@@ -17,32 +17,61 @@ import {
 const MODEL = "";
 
 /* ---------- API（サーバー経由でAPIキーを隠す） ---------- */
-// サーバーに APP_PASSCODE が設定されている場合だけ、初回に合言葉を聞いてこのブラウザに覚える
+// サーバーに APP_PASSCODE が設定されている場合だけ、合言葉を聞いてこのブラウザに覚える
 function getPasscode() { try { return localStorage.getItem("vs-passcode") || ""; } catch (e) { return ""; } }
 function setPasscode(v) { try { localStorage.setItem("vs-passcode", v); } catch (e) {} }
-async function callClaude(system, user, maxTokens, retried) {
-  const res = await fetch("/api/claude", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-app-passcode": getPasscode() },
-    body: JSON.stringify({ model: MODEL || undefined, max_tokens: maxTokens || 1500, system, messages: [{ role: "user", content: user }] }),
-  });
-  if (res.status === 401 && !retried) {
-    const code = window.prompt("合言葉を入力してください（管理者から共有されたもの）");
-    if (code) { setPasscode(code.trim()); return callClaude(system, user, maxTokens, true); }
+// 合言葉の入力画面は App が登録する（Promise で入力値か null を返す）
+let passcodeAsker = null;
+function askPasscode(wrong) { return passcodeAsker ? passcodeAsker(wrong) : Promise.resolve(null); }
+
+// 利用者向けのエラー文。技術的な詳細は括弧で残す
+function friendlyError(status, e) {
+  const type = e && e.error && e.error.type;
+  if (type === "passcode") return "合言葉が確認できませんでした。";
+  if (type === "server_key" || status === 500) return "サーバー側のAI設定に問題があり、分析を開始できません。お手数ですが管理者へご連絡ください。";
+  if (status === 429 || status === 529 || type === "overloaded_error" || type === "rate_limit_error") return "AIが混み合っています。1〜2分おいてから、もう一度お試しください。";
+  if (status === 504 || status === 502) return "AIの応答に時間がかかりすぎました。もう一度お試しください。";
+  return "AIとの通信でエラーが発生しました（" + status + "）。もう一度お試しください。";
+}
+
+async function callClaude(system, user, maxTokens) {
+  for (let attempt = 0; ; attempt++) {
+    let res;
+    try {
+      res = await fetch("/api/claude", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-app-passcode": getPasscode() },
+        body: JSON.stringify({ model: MODEL || undefined, max_tokens: maxTokens || 1500, system, messages: [{ role: "user", content: user }] }),
+      });
+    } catch (x) { throw new Error("通信できませんでした。インターネット接続を確認して、もう一度お試しください。"); }
+    let data = null;
+    try { data = await res.json(); } catch (x) {}
+    if (res.status === 401 && data && data.error && data.error.type === "passcode" && attempt < 3) {
+      const code = await askPasscode(attempt > 0 || !!getPasscode());
+      if (!code) throw new Error("合言葉の入力がキャンセルされました。");
+      setPasscode(code.trim());
+      continue;
+    }
+    if (!res.ok || !data) throw new Error(friendlyError(res.status, data));
+    const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+    return { text, truncated: data.stop_reason === "max_tokens" };
   }
-  if (!res.ok) {
-    let msg = "API応答エラー (" + res.status + ")";
-    try { const e = await res.json(); if (e && e.error) msg += "：" + (e.error.message || JSON.stringify(e.error)); } catch (x) {}
-    throw new Error(msg);
-  }
-  const data = await res.json();
-  return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
 }
 function parseJSON(text) {
   let t = (text || "").trim().replace(/^```json/i, "").replace(/^```/, "").replace(/```$/, "").trim();
   const s = t.indexOf("{"), e = t.lastIndexOf("}");
   if (s >= 0 && e >= 0) t = t.slice(s, e + 1);
   return JSON.parse(t);
+}
+// AIにJSONで答えさせる。途中で切れた・読めなかった場合は、上限を倍にして1回だけやり直す
+async function askJSON(system, user, maxTokens) {
+  let limit = maxTokens || 2000;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = await callClaude(system, user, limit);
+    if (!r.truncated) { try { return parseJSON(r.text); } catch (e) {} }
+    limit = Math.min(limit * 2, 8000);
+  }
+  throw new Error("AIの回答を最後まで読み取れませんでした。入力する事業の数を減らすか、もう一度お試しください。");
 }
 
 /* ---------- format ---------- */
@@ -145,6 +174,18 @@ const PF_SYS =
 
 function emptyRows() {
   return [1, 2, 3].map((n) => newRow("B" + String(n).padStart(3, "0")));
+}
+// 事業一覧はこのブラウザにだけ自動保存。読み込み時に旧形式からの移行もかける
+const PF_STORE = "vs-portfolio-v1";
+function loadPortfolio() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PF_STORE) || "null");
+    if (Array.isArray(saved) && saved.length) return saved.map((r, i) => normalizeRow(r, "B" + String(i + 1).padStart(3, "0")));
+  } catch (e) {}
+  return emptyRows();
+}
+function savePortfolio(rows) {
+  try { localStorage.setItem(PF_STORE, JSON.stringify(rows)); } catch (e) {}
 }
 // サンプルは旧形式（価値・補足・推進体制が別欄）のまま書き、normalizeRow で新形式へ移行して使う
 const PF_SAMPLE_LEGACY = [
@@ -428,7 +469,13 @@ export default function App() {
   const [verdictMemo, setVerdictMemo] = useState("");
 
   const [mode, setMode] = useState("new"); // new | portfolio
-  const [portfolio, setPortfolio] = useState(emptyRows()); // 進行中事業の入力
+  const [portfolio, setPortfolio] = useState(loadPortfolio); // 進行中事業の入力（ブラウザに自動保存）
+  useEffect(() => { savePortfolio(portfolio); }, [portfolio]);
+  const [pw, setPw] = useState(null); // 合言葉の入力画面 { wrong, resolve }
+  useEffect(() => {
+    passcodeAsker = (wrong) => new Promise((resolve) => setPw({ wrong, resolve }));
+    return () => { passcodeAsker = null; };
+  }, []);
   const [pfResult, setPfResult] = useState(null); // {businesses, portfolio}
   const [pfSort, setPfSort] = useState("reach");
   const [pfAxis, setPfAxis] = useState({ x: "resource", y: "reach" });
@@ -464,13 +511,13 @@ export default function App() {
         "【業界・ドメイン】\n" + (input.domain || "（指定なし）") + "\n\n" +
         "【制約・前提】\n" + (input.constraint || "（特になし）") + "\n\n" +
         (input.materials ? "【アップロード資料】\n" + input.materials + "\n" : "");
-      const j = parseJSON(await callClaude(candSys(themeLabel, targetLabel, question), user));
+      const j = await askJSON(candSys(themeLabel, targetLabel, question), user, 4000);
       const list = (j.candidates || []).slice(0, 3);
       if (!list.length) throw new Error("案を生成できませんでした");
       setCandidates(list); setSelectedIdx(null);
       setResults({}); setStatus({}); setSim(null); setDeck(null); setVerdict(null);
       setStep("candidates");
-    } catch (e) { setError("生成に失敗しました：" + e.message + "（もう一度お試しください）"); }
+    } catch (e) { setError("生成に失敗しました：" + e.message); }
     finally { setLoading(false); }
   }
 
@@ -490,7 +537,7 @@ export default function App() {
   async function generateStation(id) {
     setStatus((s) => ({ ...s, [id]: "loading" })); setError(null);
     try {
-      const j = parseJSON(await callClaude(V_SYS[id], baseContext()));
+      const j = await askJSON(V_SYS[id], baseContext(), 3000);
       setResults((r) => ({ ...r, [id]: j }));
       setStatus((s) => ({ ...s, [id]: "done" }));
       if (id === "forecast") seedSim(j);
@@ -538,7 +585,7 @@ export default function App() {
         "／累計投資上限 " + yen(exitLine.limits.maxInvestment) + "\n（撤退ラインを1枚のスライドに入れること）\n";
     }
     if (results.execkpi?.salesKpis) ctx += "売上KPI: " + results.execkpi.salesKpis.map((k) => k.name + "=" + k.target).join(", ") + "\n";
-    try { setDeck(parseJSON(await callClaude(SYS_DECK, ctx))); setStep("pitch"); }
+    try { setDeck(await askJSON(SYS_DECK, ctx, 4000)); setStep("pitch"); }
     catch (e) { setError("資料生成に失敗しました：" + e.message); }
     finally { setDeckLoading(false); }
   }
@@ -556,7 +603,8 @@ export default function App() {
           "｜形態:" + (r.bizType || "BtoB") + "｜売価:" + (Number(r.price) > 0 ? yen(r.price) : "未定") + "｜原価:" + (Number(r.unitCost) > 0 ? yen(r.unitCost) : "未定") +
           "｜粗利率:" + (Number(r.price) > 0 ? marginPct(r.price, r.unitCost) + "%" : "—") + "｜頻度:" + freqText(r) +
           "｜投入リソース:" + (r.resource || "?") + "人日/月｜熱量:" + r.passion + "/5｜ステージ:" + r.stage).join("\n");
-      const j = parseJSON(await callClaude(PF_SYS, user));
+      // 事業数に応じて回答の上限を広げる（1事業あたり約700トークン＋全体診断）
+      const j = await askJSON(PF_SYS, user, Math.min(8000, 2000 + 700 * rows.length));
       const aiMap = {};
       (j.businesses || []).forEach((b) => { aiMap[b.name] = b; });
       const merged = rows.map((r) => {
@@ -590,7 +638,7 @@ export default function App() {
       });
       setPfResult({ businesses: merged, portfolio: j.portfolio || {}, targetAmount, targetLabel });
       setStep("pfboard");
-    } catch (e) { setError("整理に失敗しました：" + e.message + "（もう一度お試しください）"); }
+    } catch (e) { setError("整理に失敗しました：" + e.message); }
     finally { setLoading(false); }
   }
 
@@ -614,11 +662,11 @@ export default function App() {
     const allFacts = prevFacts.concat(addedFacts || []);
     const user = base + (allFacts.length ? "\n\n【壁打ちで追加で判明した事実】\n" + allFacts.map((f) => "・" + f).join("\n") : "");
     try {
-      const data = parseJSON(await callClaude(EVAL_SYS, user, 4000));
+      const data = await askJSON(EVAL_SYS, user, 6000);
       const items = data.items || {};
       const score = computeScore(items);
       setDeepEval({ biz: b, data, items, score, ev: evidenceLevel(items), addedFacts: allFacts });
-    } catch (e) { setError("詳細評価に失敗しました：" + e.message + "（もう一度お試しください）"); setStep("pfboard"); }
+    } catch (e) { setError("詳細評価に失敗しました：" + e.message); setStep("pfboard"); }
     finally { setDeepLoading(false); }
   }
   function deepEvalToSim() { if (deepEval) selectPortfolioBiz(deepEval.biz); }
@@ -634,7 +682,7 @@ export default function App() {
       "\n【未検証・弱点の項目】\n" + (weak.length ? weak.join("\n") : "（主要項目は概ね評価済み）") +
       "\nこの中から、1億到達の判断を最も前進させる質問を3〜5問。";
     try {
-      const j = parseJSON(await callClaude(INTERVIEW_SYS, user, 1500));
+      const j = await askJSON(INTERVIEW_SYS, user, 2000);
       const qs = (j.questions || []).slice(0, 5);
       if (!qs.length) throw new Error("質問を生成できませんでした");
       setInterview({ questions: qs, answers: {} });
@@ -688,7 +736,7 @@ export default function App() {
     if (saved) { setExitLine(saved); setStep("exitline"); return; }
     setExitLine(null); setExitLoading(true); setStep("exitline");
     try {
-      const j = parseJSON(await callClaude(EXIT_SYS, ctx.text, 3500));
+      const j = await askJSON(EXIT_SYS, ctx.text, 4000);
       const gates = (j.gates || []).slice(0, 4).map((g) => ({ ...g, direction: g.direction === "down" ? "down" : "up" }));
       if (!gates.length) throw new Error("撤退ラインを生成できませんでした");
       const el = {
@@ -697,7 +745,7 @@ export default function App() {
         createdAt: new Date().toISOString().slice(0, 10),
       };
       setExitLine(el); saveExitLine(el);
-    } catch (e) { setError("撤退ラインの設計に失敗しました：" + e.message + "（もう一度お試しください）"); setStep(from); }
+    } catch (e) { setError("撤退ラインの設計に失敗しました：" + e.message); setStep(from); }
     finally { setExitLoading(false); }
   }
   function updateExitLine(next) { setExitLine(next); saveExitLine(next); }
@@ -706,7 +754,7 @@ export default function App() {
     setExitLine(null);
     setStep("intro"); setCandidates(null); setSelectedIdx(null);
     setResults({}); setStatus({}); setSim(null); setDeck(null); setVerdict(null); setVerdictMemo(""); setError(null);
-    setPfResult(null); setPortfolio(emptyRows()); setDeepEval(null); setInterview(null);
+    setPfResult(null); setDeepEval(null); setInterview(null);
   }
 
   const ranked = useMemo(() => {
@@ -779,6 +827,7 @@ export default function App() {
       </main>
 
       {loading && (step === "input" || step === "pfinput") && <Overlay msg={loadingMsg} />}
+      {pw && <PasscodeModal wrong={pw.wrong} onDone={(v) => { pw.resolve(v); setPw(null); }} />}
     </div>
   );
 }
@@ -896,6 +945,16 @@ function Intro({ onPick }) {
         </button>
       </div>
 
+      <div className="bp-howto">
+        <span className="bp-howtohd">使い方は3ステップ</span>
+        <ol>
+          <li><b>1</b><div><strong>やることを選ぶ</strong><p>いま走っている事業を見直すなら「進行中の事業」、新しく考えるなら「新しいアイデア」。</p></div></li>
+          <li><b>2</b><div><strong>入力する</strong><p>事業名・売価・原価など必須の6項目だけでOK。「サンプル」で入力例を試せます。CSVの読み込みも可。</p></div></li>
+          <li><b>3</b><div><strong>AIの評価を見て決める</strong><p>3年で1億円に届く可能性を100点で採点。続けるなら撤退ラインを決めて、経営層向けの資料へ。</p></div></li>
+        </ol>
+      </div>
+      <DataNotice />
+
       <p className="bp-note">事業を、感覚ではなく設計する。 IDEA → TEST → EVIDENCE → SCALE</p>
     </section>
   );
@@ -959,6 +1018,7 @@ function InputScreen({ value, onChange, theme, setTheme, target, setTarget, onSu
           <button className="bp-ghost" onClick={() => onChange({ ...SAMPLE })}>サンプル（架空の製造業）</button>
         </div>
       </div>
+      <DataNotice />
       <div className="bp-actionbar">
         <button className="bp-cta" disabled={!canSubmit} onClick={onSubmit}>{loading ? "生成中…" : "3案を生成する →"}</button>
       </div>
@@ -1398,6 +1458,42 @@ function InfoList({ head, items }) { return <div className="bp-infolist"><span c
 function Skeleton({ msg }) { return <div className="bp-skel"><div className="bp-spinner" /><p>{msg}</p></div>; }
 function Overlay({ msg }) { return <div className="bp-overlay"><div className="bp-spinner big" /><p>{msg}</p></div>; }
 
+/* ========================= データの扱い・合言葉 ========================= */
+function DataNotice({ saved }) {
+  return (
+    <p className="bp-datanotice">
+      <span aria-hidden="true">🔒</span>
+      入力内容は、AIによる分析のため Anthropic 社のAIサービスに送信されます。本ツールのサーバーには保存されません。
+      {saved && "入力中の事業一覧は、お使いのブラウザ内にだけ自動保存されます。"}
+    </p>
+  );
+}
+function PasscodeModal({ wrong, onDone }) {
+  const [v, setV] = useState("");
+  const [show, setShow] = useState(false);
+  const ref = useRef();
+  useEffect(() => { ref.current && ref.current.focus(); }, []);
+  function submit(e) { e.preventDefault(); if (v.trim()) onDone(v.trim()); }
+  return (
+    <div className="bp-modalback" role="dialog" aria-modal="true" aria-labelledby="pw-title">
+      <form className="bp-modal" onSubmit={submit}>
+        <span className="bp-tag">PASSCODE</span>
+        <h2 id="pw-title">合言葉を入力してください</h2>
+        <p>AIによる分析を始めるには、ご案内メールとは別にお送りした合言葉が必要です。一度入力すると、このブラウザでは次回から入力不要です。</p>
+        {wrong && <p className="bp-modalerr" role="alert">合言葉が違います。もう一度ご確認ください。</p>}
+        <div className="bp-pwrow">
+          <input ref={ref} className="bp-in" type={show ? "text" : "password"} value={v} onChange={(e) => setV(e.target.value)} autoComplete="off" aria-label="合言葉" placeholder="合言葉" />
+          <button type="button" className="bp-ghost small" onClick={() => setShow((x) => !x)}>{show ? "隠す" : "表示"}</button>
+        </div>
+        <div className="bp-modalbtns">
+          <button type="button" className="bp-ghost" onClick={() => onDone(null)}>キャンセル</button>
+          <button type="submit" className="bp-cta" disabled={!v.trim()}>確認して続ける →</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 /* ========================= Portfolio Input ========================= */
 // 各欄の短い説明（ⓘ）。見出しは短く、補足はここへ
 const PF_TIPS = {
@@ -1605,6 +1701,7 @@ function PortfolioInput({ rows, setRows, target, setTarget, onSubmit, loading, o
         <button className="bp-ghost" onClick={exportNow} disabled={!named.length}>⇩ CSVで書き出す</button>
         <button className="bp-ghost" onClick={() => downloadText(templateCsv(), "事業一覧_テンプレート.csv")}>テンプレートCSVをダウンロード</button>
         <button className="bp-ghost" onClick={() => { setRows(PF_SAMPLE.map((x) => ({ ...x }))); setReport(null); }}>サンプル</button>
+        <button className="bp-textbtn" onClick={() => { if (window.confirm("入力した事業をすべて消去します。よろしいですか？（元に戻せません）")) { setRows(emptyRows()); setReport(null); } }}>すべてクリア</button>
       </div>
 
       {report && (
@@ -1622,6 +1719,8 @@ function PortfolioInput({ rows, setRows, target, setTarget, onSubmit, loading, o
           )}
         </div>
       )}
+
+      <DataNotice saved />
 
       {showMiss && incomplete.length > 0 && (
         <div className="bp-error inline" role="alert">
@@ -2711,6 +2810,25 @@ const CSS = `
 .bp-modecard p{font-size:13px; line-height:1.75; color:var(--ink-soft);}
 .bp-modego{display:inline-block; margin-top:16px; font-size:13.5px; font-weight:700; color:var(--orange);}
 .bp-modecard.alt .bp-modego{color:var(--navy);}
+
+/* data notice / passcode / howto */
+.bp-datanotice{display:flex; gap:8px; align-items:flex-start; font-size:12px; line-height:1.6; color:var(--ink-soft); background:var(--canvas); border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-top:16px;}
+.bp-modalback{position:fixed; inset:0; z-index:100; background:rgba(19,32,45,.55); display:flex; align-items:center; justify-content:center; padding:16px;}
+.bp-modal{background:var(--paper); border-radius:12px; padding:24px; width:min(440px,100%); box-shadow:0 18px 50px rgba(0,0,0,.25); display:flex; flex-direction:column; gap:12px; border-top:5px solid var(--orange);}
+.bp-modal h2{font-size:19px; font-weight:900;}
+.bp-modal p{font-size:13px; line-height:1.7; color:var(--ink-soft);}
+.bp-modal .bp-modalerr{color:var(--danger); font-weight:700;}
+.bp-modal .bp-tag{align-self:flex-start;}
+.bp-pwrow{display:flex; gap:8px;} .bp-pwrow .bp-in{height:42px; font-size:15px;} .bp-pwrow .bp-ghost{white-space:nowrap; flex-shrink:0;}
+.bp-modalbtns{display:flex; justify-content:flex-end; gap:10px; flex-wrap:wrap; margin-top:4px;}
+.bp-howto{margin:22px 0 4px; background:var(--paper); border:1px solid var(--line); border-radius:10px; padding:16px 18px;}
+.bp-howtohd{display:block; font-size:12px; font-weight:700; color:var(--orange); margin-bottom:10px;}
+.bp-howto ol{list-style:none; margin:0; padding:0; display:grid; grid-template-columns:repeat(3,1fr); gap:14px;}
+.bp-howto li{display:flex; gap:10px; align-items:flex-start;}
+.bp-howto li > b{flex-shrink:0; width:26px; height:26px; border-radius:50%; background:var(--navy); color:#fff; display:flex; align-items:center; justify-content:center; font-family:var(--font-num); font-size:13px;}
+.bp-howto strong{display:block; font-size:14px; margin-bottom:2px;}
+.bp-howto p{font-size:12.5px; line-height:1.6; color:var(--ink-soft);}
+@media(max-width:760px){ .bp-howto ol{grid-template-columns:1fr;} }
 
 /* portfolio input */
 .bp-biztable{border:1px solid var(--line); border-radius:8px; background:var(--paper);}
