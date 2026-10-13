@@ -495,6 +495,7 @@ export default function App() {
   const [portfolio, setPortfolio] = useState(loadPortfolio); // 進行中事業の入力（ブラウザに自動保存）
   useEffect(() => { savePortfolio(portfolio); }, [portfolio]);
   const [pw, setPw] = useState(null); // 合言葉の入力画面 { wrong, resolve }
+  const [guideOpen, setGuideOpen] = useState(false);
   useEffect(() => {
     passcodeAsker = (wrong) => new Promise((resolve) => setPw({ wrong, resolve }));
     return () => { passcodeAsker = null; };
@@ -816,7 +817,7 @@ export default function App() {
   return (
     <div className="bp-root">
       <style>{CSS}</style>
-      <Header step={step} onHome={restart} />
+      <Header step={step} onHome={restart} onGuide={() => setGuideOpen(true)} />
       {step !== "intro" && <StepBar step={step} mode={mode} status={status} sim={sim} />}
 
       {error && (
@@ -824,7 +825,7 @@ export default function App() {
       )}
 
       <main className="bp-main">
-        {step === "intro" && <Intro onPick={(m) => { setMode(m); setStep(m === "portfolio" ? "pfinput" : "input"); }} />}
+        {step === "intro" && <Intro onPick={(m) => { setMode(m); setStep(m === "portfolio" ? "pfinput" : "input"); }} onGuide={() => setGuideOpen(true)} />}
         {step === "input" && (
           <InputScreen value={input} onChange={setInput} theme={theme} setTheme={setTheme} target={target} setTarget={setTarget}
             onSubmit={generateCandidates} loading={loading} />
@@ -871,6 +872,7 @@ export default function App() {
       </main>
 
       {loading && (step === "input" || step === "pfinput") && <Overlay msg={loadingMsg} />}
+      {guideOpen && <GuideModal initial={GUIDE_FOR_STEP[step]} onClose={() => setGuideOpen(false)} />}
       {pw && <PasscodeModal wrong={pw.wrong} onDone={(v) => { pw.resolve(v); setPw(null); }} />}
     </div>
   );
@@ -892,7 +894,7 @@ function computeSim(s) {
 }
 
 /* ========================= Header ========================= */
-function Header({ step, onHome }) {
+function Header({ step, onHome, onGuide }) {
   return (
     <header className="bp-top">
       <Cross className="c1" /><Cross className="c2" />
@@ -901,6 +903,7 @@ function Header({ step, onHome }) {
         <span className="bp-wmsub">事業を、感覚ではなく設計する。 IDEA → TEST → EVIDENCE → SCALE</span>
       </div>
       <div className="bp-topright">
+        <button className="bp-home guide" onClick={onGuide} title="使い方ガイドを開く"><span className="bp-homeicon">?</span>使い方ガイド</button>
         {step !== "intro" && <button className="bp-home" onClick={onHome} title="最初のページに戻る"><span className="bp-homeicon">⌂</span>トップへ戻る</button>}
         <span className="bp-spec">VALIDATION</span>
       </div>
@@ -957,7 +960,7 @@ function StepBar({ step, mode, status, sim }) {
 }
 
 /* ========================= Intro ========================= */
-function Intro({ onPick }) {
+function Intro({ onPick, onGuide }) {
   return (
     <section className="bp-intro">
       <div className="bp-ruler"><span>0</span><span>100</span><span>200</span><span>300</span><span>400</span><span>500</span></div>
@@ -990,7 +993,7 @@ function Intro({ onPick }) {
       </div>
 
       <div className="bp-howto">
-        <span className="bp-howtohd">使い方は3ステップ</span>
+        <div className="bp-howtotop"><span className="bp-howtohd">使い方は3ステップ</span><button className="bp-textbtn link" onClick={onGuide}>詳しい使い方ガイドを見る →</button></div>
         <ol>
           <li><b>1</b><div><strong>やることを選ぶ</strong><p>いま走っている事業を見直すなら「進行中の事業」、新しく考えるなら「新しいアイデア」。</p></div></li>
           <li><b>2</b><div><strong>入力する</strong><p>事業名・売価・原価など必須の6項目だけでOK。「サンプル」で入力例を試せます。CSVの読み込みも可。</p></div></li>
@@ -1501,6 +1504,177 @@ function Callout({ label, children, accent }) { return <div className={"bp-callo
 function InfoList({ head, items }) { return <div className="bp-infolist"><span className="bp-infohd">{head}</span><ul>{items.map((x, i) => <li key={i}>{x}</li>)}</ul></div>; }
 function Skeleton({ msg }) { return <div className="bp-skel"><div className="bp-spinner" /><p>{msg}</p></div>; }
 function Overlay({ msg }) { return <div className="bp-overlay"><div className="bp-spinner big" /><p>{msg}</p></div>; }
+
+/* ========================= 使い方ガイド ========================= */
+// 画面ごとに開く章を変える（いま見ている画面の説明から読める）
+const GUIDE_FOR_STEP = {
+  intro: "start", pfinput: "portfolio", pfboard: "result", deepeval: "result", interview: "result",
+  exitline: "exit", input: "idea", candidates: "idea", verify: "idea", pitch: "idea",
+};
+const GUIDE_SECTIONS = [
+  { id: "start", title: "はじめに", body: (
+    <>
+      <p className="lead">このツールは、事業が<b>「3年で年商1億円に届くか」</b>を、感覚ではなく<b>数字と証拠</b>で判断するためのものです。</p>
+      <h4>できること</h4>
+      <ul>
+        <li><b>進行中の事業を検証</b>：いま走っている複数の事業を同じ基準で採点し、「集中・継続・実証・縮小・撤退」に仕分けます。</li>
+        <li><b>新しいアイデアを検証</b>：お題と自社の強みから事業案を3つ作り、市場・収益・売上を検証して、経営層向けの資料の骨子まで作ります。</li>
+        <li><b>撤退ラインを決める</b>：始める前に「いつ・何が・いくつ未満なら畳むか」を合意し、定例で実績を入れると継続／ピボット／撤退を判定します。</li>
+      </ul>
+      <h4>はじめての方へ</h4>
+      <ol>
+        <li>トップで「進行中の事業を検証する」を選ぶ</li>
+        <li>「サンプル」ボタンで入力例を入れる</li>
+        <li>「多角的に整理する」を押す（30秒〜1分ほど）</li>
+      </ol>
+      <p>これで一通りの画面を体験できます。初回は合言葉の入力を求められます。</p>
+    </>
+  ) },
+  { id: "portfolio", title: "進行中の事業を検証する", body: (
+    <>
+      <h4>1. 事業を入力する</h4>
+      <ul>
+        <li>必須は<b>6項目</b>だけです：事業名・形態（BtoB/BtoC）・売価・原価・頻度・ステージ。粗利率は自動で計算されます。</li>
+        <li><b>頻度</b>は「単発／月額／年額／年◯回」から選びます。月額は年12回として計算します。</li>
+        <li><b>ステージ</b>はどこまで進めたか（アイデア→検証→立ち上げ→運用）です。</li>
+        <li>「▸ 詳細を追加」から、概要・検証状況・熱量・リソース・メモを足せます。入れるほど評価が正確になります。</li>
+        <li><b>検証状況</b>（顧客にどこまで確かめたか）は評価に大きく効きます。「話を聞いた」と「受注あり」では結果が大きく変わります。</li>
+        <li><b>メモ</b>には、数字以外の価値（CSR・採用効果など）、何社に聞いたか、誰が推進しているかを書いてください。</li>
+      </ul>
+      <p className="tip">入力内容はこのブラウザに自動保存されます。ページを閉じても消えません。</p>
+      <h4>2. 「多角的に整理する」を押す</h4>
+      <p>事業ごとにAIが評価します（同時に3件ずつ、30秒〜1分ほど）。進み具合は画面に表示されます。</p>
+      <h4>3. 結果を見て、気になる事業を「詳しく評価する」</h4>
+      <p>一覧でランクと判定を確認し、気になる事業は「詳しく評価する →」で100点満点の詳細評価に進みます。見方は「結果の見方」の章をご覧ください。</p>
+      <h4>4. 「次にやること」に沿って進める</h4>
+      <ol>
+        <li><b>足りない情報を埋める</b>：AIの質問に3〜5問答えると、未検証の項目が埋まり点数が正確になります。</li>
+        <li><b>数字で詰める</b>：顧客数×単価×頻度で、3年間の売上・利益・投資回収を試算します。</li>
+        <li><b>撤退ラインを決める</b>：続ける事業について、畳む条件を決めます。</li>
+      </ol>
+      <p>状況に応じて「おすすめ」が表示されます。迷ったらおすすめから進めてください。</p>
+    </>
+  ) },
+  { id: "result", title: "結果の見方", body: (
+    <>
+      <h4>一覧（事業ランキング）</h4>
+      <table className="bp-guidetable">
+        <thead><tr><th>ランク</th><th>判定</th><th>意味</th></tr></thead>
+        <tbody>
+          <tr><td>A</td><td>集中</td><td>最優先で続け、人と予算を寄せる</td></tr>
+          <tr><td>B</td><td>継続</td><td>続ける。伸ばし方を詰める</td></tr>
+          <tr><td>C</td><td>実証</td><td>条件つき。小さく試して見極める</td></tr>
+          <tr><td>D</td><td>縮小</td><td>縮小・見直しの候補</td></tr>
+          <tr><td>E</td><td>撤退</td><td>撤退を検討し、人と予算を解放する</td></tr>
+        </tbody>
+      </table>
+      <ul>
+        <li>市場規模・利益率・参入障壁・独自性を各1〜5点で採点し、100点満点に換算してランクを決めます。</li>
+        <li><b>3年後売上</b>は「普通」の見込みを大きく、その下に「悲観〜楽観」の幅を表示します。</li>
+      </ul>
+      <h4>詳細評価（100点）</h4>
+      <ul>
+        <li>6つの大項目（顧客課題・需要／市場／1億円の売上モデル／収益性／勝てる理由／実行・推進体制）の計26項目を、事実と証拠から0〜5点で採点します。</li>
+        <li><b>Evidence Level（1〜5）</b>：顧客の証拠の強さです。「欲しいと言われた」より「実際に買われた」ほど高くなります。</li>
+        <li><b>評価カバレッジ</b>：情報があって採点できた項目の割合です。低いときは「足りない情報を埋める」で質問に答えてください。</li>
+        <li><b>1億円への方程式</b>：1億円に必要な顧客数を逆算します。</li>
+        <li><b>最大ボトルネック</b>と<b>次の3ヶ月で証明すること</b>が、次の打ち手の出発点です。</li>
+      </ul>
+      <p className="tip">点数はAIによる推定です。数点の差より、「何が足りないか」「次に何を確かめるか」に注目してお使いください。</p>
+    </>
+  ) },
+  { id: "exit", title: "撤退ラインを決める", body: (
+    <>
+      <p className="lead">始める前に「畳む条件」を数字で決めておくと、サンクコストに引きずられず、早く小さく見切れます。</p>
+      <ol>
+        <li><b>成功確率</b>を確認します。「成功確率を上げる打ち手」で、やると決めたものにチェックを入れると確率に反映されます。</li>
+        <li><b>ステージゲート</b>（3ヶ月・6ヶ月・12ヶ月など）ごとに、測る指標・<b>継続ライン</b>・<b>撤退ライン</b>を確認します。数値は書き換えられます。</li>
+        <li><b>ゲートに関係なく撤退する上限</b>（累計投資・期間・投入工数）を決めます。</li>
+        <li>撤退を判断する人を入れて、「この撤退ラインで合意する」を押します。</li>
+      </ol>
+      <h4>定例での使い方</h4>
+      <ul>
+        <li>各ゲートの「実績」と、「いまの状況」（経過月・累計投資・工数）を入れると、<b>継続／ピボット／撤退</b>が自動で判定されます。</li>
+        <li>継続ライン以上＝継続、撤退ライン以下＝撤退、その間＝ピボット（打ち手を変えて再検証）。<b>ピボットは1回まで</b>で、2回目は撤退です。</li>
+        <li>上限のどれかに達したら、ゲートに関係なく撤退です。</li>
+      </ul>
+      <p className="tip">内容はブラウザに自動保存されます。「テキストでコピー」「Excelで保存」で共有できます。</p>
+    </>
+  ) },
+  { id: "idea", title: "新しいアイデアを検証する", body: (
+    <>
+      <ol>
+        <li><b>お題と目標を選ぶ</b>：「強み・技術を生かす」「困りごとを商品にする」「新しい種から」から選び、目標（1億円／3億円）を決めます。</li>
+        <li><b>種を入れる</b>：解決したい課題・ターゲット顧客・自社の強みなどを書きます。「サンプル」で入力例を試せます。</li>
+        <li><b>3案を比較する</b>：AIが方向性の違う3案を作ります。気になる案で「この案を検証する」を押します。</li>
+        <li><b>事業性を検証する</b>：「①〜④をまとめて検証」で、市場規模・顧客と競合・収益構造・売上予測をまとめて調べます。</li>
+        <li><b>事業計画を試算する</b>：⑤のシミュレーターで顧客数・単価・成長率などを動かすと、3年間の売上・利益・回収がすぐ変わります。</li>
+        <li><b>撤退ラインを決めて、ピッチへ</b>：「撤退ライン・成功確率を決める」のあと「3分ピッチ資料をつくる」で、経営層向けのスライドの骨子を作ります。</li>
+      </ol>
+    </>
+  ) },
+  { id: "csv", title: "CSVで一括入力・保存", body: (
+    <>
+      <ul>
+        <li>「<b>テンプレートCSVをダウンロード</b>」で記入用のひな形（見出し＋記入例1行）を取得できます。Excelで開いて記入し、CSVで保存してください。</li>
+        <li>「<b>CSV / Excel を読み込む</b>」で取り込みます。文字コード（UTF-8／Shift_JIS）は自動で判別します。</li>
+        <li>「BtoB／B2B」「300,000」「120000円」などの表記ゆれもそのまま読み込めます。</li>
+        <li>IDが同じ行は<b>上書き</b>、IDが空の行は<b>新規追加</b>になります。</li>
+        <li>読み込めなかった行は、行番号と理由が一覧で表示されます。正しい行だけ取り込まれます。</li>
+        <li>「<b>CSVで書き出す</b>」で入力内容を保存できます。別のパソコンへの持ち運びや、社内での共有にお使いください。</li>
+      </ul>
+    </>
+  ) },
+  { id: "faq", title: "よくある質問", body: (
+    <>
+      <h4>入力した内容はどこに送られますか？</h4>
+      <p>分析のためだけにAI（Claude／Anthropic社）へ暗号化して送信されます。AIの学習には使われず、本ツールに保存されることもありません。入力中の事業一覧は、お使いのブラウザ内にのみ保存されます。個人を特定できる情報は入力しないでください。</p>
+      <h4>合言葉を聞かれます</h4>
+      <p>ご案内とは別にお送りした合言葉を入れてください。一度入れると、同じブラウザでは次回から聞かれません。</p>
+      <h4>時間がかかります</h4>
+      <p>事業の数が多いほど時間がかかります（6事業で30秒〜1分ほど）。画面に進み具合が表示されている間は、そのままお待ちください。</p>
+      <h4>「混み合っています」と表示されました</h4>
+      <p>1〜2分おいてから、もう一度お試しください。続く場合は、AIの利用上限に達している可能性がありますので、ご連絡ください。</p>
+      <h4>同じ入力でも点数が少し変わります</h4>
+      <p>AIによる推定のため、数点のぶれが出ることがあります。ランクや「何が足りないか」に注目してお使いください。</p>
+      <h4>入力をやり直したい</h4>
+      <p>事業の入力画面の「すべてクリア」で消去できます（元に戻せません。必要なら先に「CSVで書き出す」で保存してください）。</p>
+    </>
+  ) },
+];
+
+function GuideModal({ initial, onClose }) {
+  const [sec, setSec] = useState(initial || "start");
+  const bodyRef = useRef();
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  useEffect(() => { if (bodyRef.current) bodyRef.current.scrollTop = 0; }, [sec]);
+  const cur = GUIDE_SECTIONS.find((s) => s.id === sec) || GUIDE_SECTIONS[0];
+  return (
+    <div className="bp-modalback" role="dialog" aria-modal="true" aria-labelledby="guide-title" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="bp-guide">
+        <div className="bp-guidehead">
+          <h2 id="guide-title">使い方ガイド</h2>
+          <button className="bp-errclose" onClick={onClose} aria-label="ガイドを閉じる">×</button>
+        </div>
+        <div className="bp-guidewrap">
+          <nav className="bp-guidenav" aria-label="ガイドの目次">
+            {GUIDE_SECTIONS.map((s) => (
+              <button key={s.id} className={s.id === sec ? "on" : ""} aria-current={s.id === sec} onClick={() => setSec(s.id)}>{s.title}</button>
+            ))}
+          </nav>
+          <div className="bp-guidebody" ref={bodyRef}>
+            <h3>{cur.title}</h3>
+            {cur.body}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /* ========================= データの扱い・合言葉 ========================= */
 function DataNotice() {
@@ -2897,6 +3071,39 @@ const CSS = `
 .bp-modecard p{font-size:13px; line-height:1.75; color:var(--ink-soft);}
 .bp-modego{display:inline-block; margin-top:16px; font-size:13.5px; font-weight:700; color:var(--orange);}
 .bp-modecard.alt .bp-modego{color:var(--navy);}
+
+/* guide */
+.bp-home.guide{margin-right:8px;}
+.bp-howtotop{display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px;}
+.bp-howtotop .bp-howtohd{margin-bottom:0;}
+.bp-textbtn.link{color:var(--orange); padding:0;}
+.bp-guide{background:var(--paper); border-radius:12px; width:min(920px,100%); height:min(640px,calc(100vh - 32px)); display:flex; flex-direction:column; box-shadow:0 18px 50px rgba(0,0,0,.25); overflow:hidden;}
+.bp-guidehead{display:flex; align-items:center; gap:10px; padding:14px 20px; background:var(--navy); color:#fff;}
+.bp-guidehead h2{font-size:17px; font-weight:900;}
+.bp-guidehead .bp-errclose{color:#fff;}
+.bp-guidewrap{flex:1; display:flex; min-height:0;}
+.bp-guidenav{width:210px; flex-shrink:0; border-right:1px solid var(--line); padding:12px 8px; display:flex; flex-direction:column; gap:2px; overflow-y:auto; background:var(--canvas);}
+.bp-guidenav button{text-align:left; background:none; border:none; border-radius:6px; padding:9px 12px; font-size:13px; font-weight:700; color:var(--ink-soft);}
+.bp-guidenav button:hover{background:var(--paper); color:var(--ink);}
+.bp-guidenav button.on{background:var(--orange); color:#fff;}
+.bp-guidebody{flex:1; overflow-y:auto; padding:20px 26px 28px; font-size:13.5px; line-height:1.8; color:var(--ink);}
+.bp-guidebody h3{font-size:18px; font-weight:900; margin-bottom:10px;}
+.bp-guidebody h4{font-size:14px; font-weight:900; margin:16px 0 4px; color:var(--navy);}
+.bp-guidebody ul,.bp-guidebody ol{margin:4px 0 8px 20px;}
+.bp-guidebody li{margin-top:3px;}
+.bp-guidebody p{margin-top:4px;}
+.bp-guidebody p.lead{font-size:14.5px;}
+.bp-guidebody p.tip{background:var(--orange-soft); border-left:3px solid var(--orange); border-radius:0 6px 6px 0; padding:8px 12px; margin-top:10px; font-size:12.5px;}
+.bp-guidetable{border-collapse:collapse; margin:6px 0 8px; font-size:13px;}
+.bp-guidetable th,.bp-guidetable td{border:1px solid var(--line); padding:6px 12px; text-align:left;}
+.bp-guidetable th{background:var(--canvas); font-size:12px;}
+@media(max-width:700px){
+  .bp-guidewrap{flex-direction:column;}
+  .bp-guidenav{width:auto; flex-direction:row; flex-wrap:nowrap; overflow-x:auto; border-right:none; border-bottom:1px solid var(--line); padding:8px;}
+  .bp-guidenav button{white-space:nowrap; padding:7px 11px; font-size:12px;}
+  .bp-guidebody{padding:16px 16px 24px;}
+  .bp-home.guide{margin-right:4px;}
+}
 
 /* next steps (deep eval) */
 .bp-nextsteps{background:var(--paper); border:1px solid var(--line); border-radius:10px; padding:20px 22px; margin:18px 0 6px;}
