@@ -736,33 +736,38 @@ export default function App() {
   }
 
   // 撤退ラインの材料：新規案なら検証結果＋シミュレーター、進行中事業なら詳細評価
-  function exitContext(from) {
-    if (from === "deepeval" && deepEval) {
-      const b = deepEval.biz, d = deepEval.data || {};
-      return {
-        name: b.name,
-        text: "事業名: " + b.name + "\n概要: " + (b.memo || "") + "\nステージ: " + (b.stage || "") + " / 形態: " + (b.bizType || "") +
-          "\n売価: " + (Number(b.price) > 0 ? yen(b.price) : "未定") + " / 粗利率: " + (Number(b.price) > 0 ? b.margin + "%" : "—") +
-          "\n顧客の検証状況: " + evidenceDesc(b.vstatus) + (b.note ? "\nメモ: " + b.note.replace(/\n/g, " / ") : "") +
-          "\n1億到達可能性スコア: " + deepEval.score.total + "/100（カバレッジ" + deepEval.score.coverage + "%・Evidence Lv." + deepEval.ev + "）" +
-          (d.conclusion ? "\n結論: " + d.conclusion : "") + (d.bottleneck ? "\n最大ボトルネック: " + d.bottleneck : "") +
-          (d.criticalAssumption ? "\n崩れたら終わる前提: " + d.criticalAssumption : "") +
-          (d.equation ? "\n1億の方程式: 単価" + yen(d.equation.unitPrice) + "×頻度" + (d.equation.frequency || 1) + " → 必要顧客数" + num(d.equation.neededCustomers) : "") +
-          (deepEval.addedFacts && deepEval.addedFacts.length ? "\n追加で判明した事実: " + deepEval.addedFacts.join(" / ") : "") +
-          "\n目標: 3年で年商1億円",
-      };
-    }
-    const c = candidates[selectedIdx];
-    let text = baseContext();
+  // 撤退ラインの材料：詳細評価と試算（検証）の両方があれば両方を渡す。どこから開いても同じ材料になる
+  function deepEvalText() {
+    const b = deepEval.biz, d = deepEval.data || {};
+    return "事業名: " + b.name + "\n概要: " + (b.memo || "") + "\nステージ: " + (b.stage || "") + " / 形態: " + (b.bizType || "") +
+      "\n売価: " + (Number(b.price) > 0 ? yen(b.price) : "未定") + " / 粗利率: " + (Number(b.price) > 0 ? b.margin + "%" : "—") +
+      "\n顧客の検証状況: " + evidenceDesc(b.vstatus) + (b.note ? "\nメモ: " + b.note.replace(/\n/g, " / ") : "") +
+      "\n1億到達可能性スコア: " + deepEval.score.total + "/100（カバレッジ" + deepEval.score.coverage + "%・Evidence Lv." + deepEval.ev + "）" +
+      (d.conclusion ? "\n結論: " + d.conclusion : "") + (d.bottleneck ? "\n最大ボトルネック: " + d.bottleneck : "") +
+      (d.criticalAssumption ? "\n崩れたら終わる前提: " + d.criticalAssumption : "") +
+      (d.equation ? "\n1億の方程式: 単価" + yen(d.equation.unitPrice) + "×頻度" + (d.equation.frequency || 1) + " → 必要顧客数" + num(d.equation.neededCustomers) : "") +
+      (deepEval.addedFacts && deepEval.addedFacts.length ? "\n追加で判明した事実: " + deepEval.addedFacts.join(" / ") : "") +
+      "\n目標: 3年で年商1億円\n";
+  }
+  function verifyText(c) {
+    let text = "";
     if (results.market) text += "市場 TAM/SAM/SOM: " + yen(results.market.tam) + " / " + yen(results.market.sam) + " / " + yen(results.market.som) + "\n";
     if (results.custcomp && results.custcomp.insight) text += "顧客インサイト: " + results.custcomp.insight + "\n";
     if (c.risk) text += "想定される最大リスク: " + c.risk + "\n";
     if (sim) {
       const r = computeSim(sim);
-      text += "事業計画: 1年目顧客" + num(sim.customersY1) + "・単価" + yen(sim.price) + "・頻度" + sim.freq + "回/年・粗利率" + sim.margin + "%・年間固定費" + yen(sim.fixedCost) +
+      text += "事業計画（売上の試算）: 1年目顧客" + num(sim.customersY1) + "・単価" + yen(sim.price) + "・頻度" + sim.freq + "回/年・粗利率" + sim.margin + "%・年間固定費" + yen(sim.fixedCost) +
         "・初期投資" + yen(sim.invest) + "\n売上推移: " + r.years.map((y) => y.label + " " + yen(y.revenue)).join(" / ") + "・回収: " + (r.breakEven || "3年内未達") + "\n";
     }
-    return { name: c.name, text };
+    return text;
+  }
+  function exitContext(from) {
+    const c = candidates && selectedIdx != null ? candidates[selectedIdx] : null;
+    const name = from === "deepeval" && deepEval ? deepEval.biz.name : c.name;
+    const hasDeep = !!(deepEval && deepEval.biz.name === name);
+    const extra = c && c.name === name ? verifyText(c) : "";
+    if (hasDeep) return { name, text: deepEvalText() + (extra ? "\n【検証・売上の試算】\n" + extra : "") };
+    return { name, text: baseContext() + extra };
   }
   async function openExitLine(from, regenerate) {
     const ctx = exitContext(from);
@@ -804,6 +809,8 @@ export default function App() {
   }, [candidates, sortKey]);
 
   const selected = selectedIdx != null && candidates ? candidates[selectedIdx] : null;
+  // 詳細評価から試算に来たか（戻り先と撤退ラインの材料を揃えるため）
+  const fromDeepEval = !!(mode === "portfolio" && deepEval && selected && deepEval.biz.name === selected.name);
   const doneCount = STATIONS.filter((s) => s.ai && status[s.id] === "done").length + (sim ? 0 : 0);
 
   return (
@@ -845,7 +852,9 @@ export default function App() {
           <Verify c={selected} results={results} status={status} sim={sim} setSim={setSim}
             targetAmount={targetAmount} onGenerate={generateStation} onGenerateAll={generateAll}
             onReseed={() => results.forecast && seedSim(results.forecast)}
-            onBack={() => setStep(mode === "portfolio" ? "pfboard" : "candidates")} onDeck={generateDeck} deckLoading={deckLoading}
+            onBack={() => setStep(fromDeepEval ? "deepeval" : mode === "portfolio" ? "pfboard" : "candidates")}
+            backLabel={fromDeepEval ? "← 詳細評価へ戻る" : mode === "portfolio" ? "← 事業一覧へ戻る" : "← 3案の比較へ"}
+            onDeck={generateDeck} deckLoading={deckLoading}
             onExit={() => openExitLine("verify")} />
         )}
         {step === "exitline" && (
@@ -1137,7 +1146,7 @@ const STATIONS = [
   { id: "pitch", n: 6, label: "経営層へ提案", sub: "数字と根拠で提案", ai: false },
 ];
 
-function Verify({ c, results, status, sim, setSim, targetAmount, onGenerate, onGenerateAll, onReseed, onBack, onDeck, deckLoading, onExit }) {
+function Verify({ c, results, status, sim, setSim, targetAmount, onGenerate, onGenerateAll, onReseed, onBack, backLabel, onDeck, deckLoading, onExit }) {
   const [open, setOpen] = useState({ market: true });
   const refs = useRef({});
   function toggle(id) { setOpen((o) => ({ ...o, [id]: !o[id] })); }
@@ -1209,7 +1218,7 @@ function Verify({ c, results, status, sim, setSim, targetAmount, onGenerate, onG
       <div className="bp-keyline">"数字で語れる事業案" として提案する。</div>
 
       <div className="bp-actionbar split">
-        <button className="bp-ghost" onClick={onBack}>← 3案の比較へ</button>
+        <button className="bp-ghost" onClick={onBack}>{backLabel || "← 3案の比較へ"}</button>
         <div className="bp-actionright">
           <button className="bp-ghost" onClick={onExit}>撤退ライン・成功確率を決める</button>
           <button className="bp-cta" onClick={onDeck} disabled={deckLoading}>{deckLoading ? "作成中…" : "3分ピッチ資料をつくる →"}</button>
@@ -1885,7 +1894,7 @@ function PortfolioBoard({ result, sortKey, setSortKey, axis, setAxis, onSelect, 
                   <div className="bp-scfoot">
                     <span className={"bp-scdecision " + rm.cls}>{rm.decision}</span>
                     <span className="bp-scnote">{rm.note}{b.pathToTarget ? "／届く条件：" + b.pathToTarget : ""}</span>
-                    <button className="bp-mini" onClick={() => onSelect(b)}>深掘る →</button>
+                    <button className="bp-mini" onClick={() => onSelect(b)}>詳しく評価する →</button>
                   </div>
                 </div>
               </div>
@@ -2017,7 +2026,7 @@ function PortfolioBoard({ result, sortKey, setSortKey, axis, setAxis, onSelect, 
                 <td className="n ac"><strong className="bp-scorenum2">{b.evalPct}</strong></td>
                 <td className="n ac"><span className={"bp-rankchip " + rm.cls}>{b.rank}<em>{rm.mark}</em></span></td>
                 <td className="n ac"><span className={"bp-vbadge " + (VERDICT_META[b.verdict]?.cls || "keep")}>{b.verdict}</span></td>
-                <td className="n"><button className="bp-mini" onClick={() => onSelect(b)}>深掘る →</button></td>
+                <td className="n"><button className="bp-mini" onClick={() => onSelect(b)}>詳しく評価する →</button></td>
               </tr>
               );
             })}
@@ -2125,6 +2134,47 @@ function Interview({ biz, iv, setIv, onSubmit, onBack }) {
 }
 
 /* ========================= DeepEval（単一事業の1億円到達可能性 100点評価） ========================= */
+// 詳細評価のあとに「何を・どの順で」やるかを1か所で示す。おすすめは状況で切り替え、目立つボタンは1つだけ
+const TEAM_ITEM_IDS = ["ownerCommitment", "dedicatedCapacity", "stakeholderBuyIn"];
+function teamIsWeak(items) {
+  const ev = TEAM_ITEM_IDS.map((id) => items[id] || {}).filter((x) => x.status !== "unverified");
+  return ev.length > 0 && ev.reduce((a, x) => a + (Number(x.score) || 0), 0) / ev.length <= 2;
+}
+function NextSteps({ score, ev, items, onInterview, interviewLoading, onSim, onExit }) {
+  const needInfo = score.coverage < 85 || ev <= 3;
+  const rec = needInfo ? 1 : 3;
+  const teamWeak = teamIsWeak(items || {});
+  const steps = [
+    { n: 1, title: "足りない情報を埋める", desc: "AIの質問に3〜5問答えるだけ。未検証の項目が埋まり、点数の精度が上がります。", time: "約2分",
+      why: needInfo ? "評価カバレッジ " + score.coverage + "%・Evidence Lv." + ev + "。まだ情報が足りません" : "",
+      label: interviewLoading ? "準備中…" : "壁打ちを始める →", onClick: onInterview, disabled: interviewLoading },
+    { n: 2, title: "数字で詰める", desc: "顧客数×単価×頻度で、3年間の売上・利益・投資回収を試算します。試算結果は撤退ラインの材料にも使われます。", time: "約3分",
+      label: "売上を試算する →", onClick: onSim },
+    { n: 3, title: "続けるなら、撤退ラインを決める", desc: "「いつ・何が・いくつ未満なら畳むか」と成功確率を決めて、決裁の資料に入れます。", time: "約2分",
+      warn: teamWeak ? "推進体制（人）が弱いと判定されています。先にオーナーと投入工数を決めてから進めるのがおすすめです。" : "",
+      label: "撤退ラインを決める →", onClick: onExit },
+  ];
+  return (
+    <div className="bp-nextsteps">
+      <div className="bp-matrixhead"><h3>次にやること</h3><span className="bp-blocknote">上から順に進めるのが基本です</span></div>
+      <ol>
+        {steps.map((st) => (
+          <li key={st.n} className={st.n === rec ? "rec" : ""}>
+            <b className="bp-nsnum">{st.n}</b>
+            <div className="bp-nsbody">
+              <strong>{st.title}{st.n === rec && <span className="bp-nsrec">おすすめ</span>}<em>{st.time}</em></strong>
+              <p>{st.desc}</p>
+              {st.n === rec && st.why && <p className="bp-nswhy">{st.why}</p>}
+              {st.warn && <p className="bp-nswarn">⚠ {st.warn}</p>}
+            </div>
+            <button className={st.n === rec ? "bp-cta small" : "bp-ghost"} onClick={st.onClick} disabled={st.disabled}>{st.label}</button>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 function DeepEval({ de, loading, onBack, onSim, onInterview, interviewLoading, onExit }) {
   if (loading || !de) {
     return (
@@ -2271,14 +2321,9 @@ function DeepEval({ de, loading, onBack, onSim, onInterview, interviewLoading, o
 
       {data.strategicValue && <Callout label="数字に出ない価値">{data.strategicValue}</Callout>}
 
-      <div className="bp-actionbar split">
-        <button className="bp-ghost" onClick={onBack}>← 一覧へ戻る</button>
-        <div className="bp-actionright">
-          <button className="bp-ghost" onClick={onInterview} disabled={interviewLoading}>{interviewLoading ? "準備中…" : "壁打ちで情報を足す"}</button>
-          <button className="bp-ghost" onClick={onSim}>売上シミュレーターで深掘る</button>
-          <button className="bp-cta" onClick={onExit}>撤退ラインを決める →</button>
-        </div>
-      </div>
+      <NextSteps score={score} ev={ev} items={items} onInterview={onInterview} interviewLoading={interviewLoading} onSim={onSim} onExit={onExit} />
+
+      <div className="bp-actionbar left"><button className="bp-ghost" onClick={onBack}>← 事業一覧へ戻る</button></div>
     </section>
   );
 }
@@ -2852,6 +2897,23 @@ const CSS = `
 .bp-modecard p{font-size:13px; line-height:1.75; color:var(--ink-soft);}
 .bp-modego{display:inline-block; margin-top:16px; font-size:13.5px; font-weight:700; color:var(--orange);}
 .bp-modecard.alt .bp-modego{color:var(--navy);}
+
+/* next steps (deep eval) */
+.bp-nextsteps{background:var(--paper); border:1px solid var(--line); border-radius:10px; padding:20px 22px; margin:18px 0 6px;}
+.bp-nextsteps ol{list-style:none; margin:10px 0 0; padding:0; display:flex; flex-direction:column; gap:10px;}
+.bp-nextsteps li{display:flex; align-items:center; gap:14px; border:1px solid var(--line); border-radius:9px; padding:14px 16px; background:var(--paper);}
+.bp-nextsteps li.rec{border:2px solid var(--orange); background:var(--orange-soft);}
+.bp-nsnum{flex-shrink:0; width:30px; height:30px; border-radius:50%; background:var(--navy); color:#fff; display:flex; align-items:center; justify-content:center; font-family:var(--font-num); font-size:14px;}
+.bp-nextsteps li.rec .bp-nsnum{background:var(--orange);}
+.bp-nsbody{flex:1; min-width:0;}
+.bp-nsbody strong{display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:15px;}
+.bp-nsbody strong em{font-style:normal; font-size:11px; font-weight:500; color:var(--ink-soft);}
+.bp-nsrec{font-size:11px; font-weight:700; color:#fff; background:var(--orange); border-radius:999px; padding:2px 9px;}
+.bp-nsbody p{font-size:12.5px; line-height:1.6; color:var(--ink-soft); margin-top:3px;}
+.bp-nsbody p.bp-nswhy{color:var(--orange); font-weight:700;}
+.bp-nsbody p.bp-nswarn{color:#8A5A12; background:#FBF1DE; border-radius:6px; padding:5px 8px; margin-top:6px;}
+.bp-nextsteps li > button{flex-shrink:0; white-space:nowrap;}
+@media(max-width:640px){ .bp-nextsteps li{flex-wrap:wrap;} .bp-nextsteps li > button{width:100%;} }
 
 /* data notice / passcode / howto */
 .bp-datanotice{font-size:12px; line-height:1.6; color:var(--ink-soft); background:var(--canvas); border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-top:16px;}
