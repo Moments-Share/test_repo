@@ -640,7 +640,8 @@ export default function App() {
       if (failed.length === n) throw results[0].error;
       const pfSummary = await sumP;
       const aiAt = (i) => (results[i] && results[i].value) || {};
-      const merged = rows.map((r, i) => {
+      // 評価を取得できなかった事業は、仮の点数で「継続」などと誤って見せないよう一覧から外す
+      const merged = rows.map((r, i) => ({ r, i })).filter(({ i }) => !results[i].error).map(({ r, i }) => {
         const ai = aiAt(i);
         const margin = marginPct(r.price, r.unitCost);
         const preRevenue = (r.stage === "アイデア" || r.stage === "検証");
@@ -670,7 +671,7 @@ export default function App() {
         return b;
       });
       setPfResult({ businesses: merged, portfolio: pfSummary || {}, targetAmount, targetLabel });
-      if (failed.length) setError("一部の事業はAIの評価を取得できず、仮の点数で表示しています：" + failed.map((r) => r.name).join("、") + "。もう一度「多角的に整理する」を押すと再評価します。");
+      if (failed.length) setError("次の事業はAIの評価を取得できなかったため、一覧から外しています：" + failed.map((r) => r.name).join("、") + "。「← 事業を編集」から、もう一度「多角的に整理する」を押すと再評価します。");
       setStep("pfboard");
     } catch (e) { setError("整理に失敗しました：" + e.message); }
     finally { setLoading(false); }
@@ -1493,13 +1494,20 @@ function Skeleton({ msg }) { return <div className="bp-skel"><div className="bp-
 function Overlay({ msg }) { return <div className="bp-overlay"><div className="bp-spinner big" /><p>{msg}</p></div>; }
 
 /* ========================= データの扱い・合言葉 ========================= */
-function DataNotice({ saved }) {
+function DataNotice() {
   return (
-    <p className="bp-datanotice">
-      <span aria-hidden="true">🔒</span>
-      入力内容は、AIによる分析のため Anthropic 社のAIサービスに送信されます。本ツールのサーバーには保存されません。
-      {saved && "入力中の事業一覧は、お使いのブラウザ内にだけ自動保存されます。"}
-    </p>
+    <div className="bp-datanotice">
+      <p><span aria-hidden="true">🔒</span> 入力内容は分析のためだけにAI（Claude）へ暗号化して送信されます。<b>AIの学習には使われず、本ツールに保存されることもありません。</b></p>
+      <details>
+        <summary>詳しく</summary>
+        <ul>
+          <li>AIの提供元：Anthropic社（米国）</li>
+          <li>同社の法人向け規約により、送信内容はAIの学習には使用されません。不正利用の監視のため一定期間保持されたのち、削除されます。</li>
+          <li>本ツールのサーバーには入力内容を保存しません。入力中の事業一覧は、お使いのブラウザ内にのみ保存されます。</li>
+          <li>個人を特定できる情報（氏名・連絡先など）は入力しないでください。機密性の高い数字は、概算や伏せ字でも評価できます。</li>
+        </ul>
+      </details>
+    </div>
   );
 }
 function PasscodeModal({ wrong, onDone }) {
@@ -1754,7 +1762,7 @@ function PortfolioInput({ rows, setRows, target, setTarget, onSubmit, loading, o
         </div>
       )}
 
-      <DataNotice saved />
+      <DataNotice />
 
       {showMiss && incomplete.length > 0 && (
         <div className="bp-error inline" role="alert">
@@ -1983,7 +1991,7 @@ function PortfolioBoard({ result, sortKey, setSortKey, axis, setAxis, onSelect, 
           </div>
         </div>
         <table className="bp-pfrank wide">
-          <thead><tr><th>事業</th><th className="ac">市場規模</th><th className="ac">利益率</th><th className="ac">参入障壁</th><th className="ac">独自性</th><th className="ac">3年後売上</th><th className="ac">総合</th><th className="ac">総合ランク</th><th>判定</th><th /></tr></thead>
+          <thead><tr><th>事業</th><th className="ac">市場規模</th><th className="ac">利益率</th><th className="ac">参入障壁</th><th className="ac">独自性</th><th className="ac">3年後売上</th><th className="ac">総合</th><th className="ac">総合ランク</th><th className="ac">判定</th><th /></tr></thead>
           <tbody>
             {ranked.map((b, i) => {
               const rm = RANK_META[b.rank] || RANK_META.C;
@@ -2008,7 +2016,7 @@ function PortfolioBoard({ result, sortKey, setSortKey, axis, setAxis, onSelect, 
                 <td className="n ac"><strong className="bp-fc3">{yen(b.base3)}</strong><span className="bp-axsub">{yen(b.low3)}〜{yen(b.high3)}</span></td>
                 <td className="n ac"><strong className="bp-scorenum2">{b.evalPct}</strong></td>
                 <td className="n ac"><span className={"bp-rankchip " + rm.cls}>{b.rank}<em>{rm.mark}</em></span></td>
-                <td className="n"><span className={"bp-vbadge " + (VERDICT_META[b.verdict]?.cls || "keep")}>{b.verdict}</span></td>
+                <td className="n ac"><span className={"bp-vbadge " + (VERDICT_META[b.verdict]?.cls || "keep")}>{b.verdict}</span></td>
                 <td className="n"><button className="bp-mini" onClick={() => onSelect(b)}>深掘る →</button></td>
               </tr>
               );
@@ -2283,7 +2291,7 @@ function ExitGateTable({ el, readOnly, onGate, onActual }) {
   return (
     <div className="bp-extablewrap">
       <table className="bp-extable">
-        <thead><tr><th>時期</th><th>ゲート</th><th>測る指標</th><th className="go">継続ライン</th><th className="kill">撤退ライン</th>{!readOnly && <th>実績</th>}{!readOnly && <th>判定</th>}</tr></thead>
+        <thead><tr><th>時期</th><th>ゲート</th><th>測る指標</th><th className="go">継続ライン</th><th className="kill">撤退ライン</th>{!readOnly && <th>実績</th>}{!readOnly && <th className="ac">判定</th>}</tr></thead>
         <tbody>
           {el.gates.map((g, i) => {
             const v = gateVerdict(g, (el.actuals || {})[i]); const m = v && GATE_META[v];
@@ -2846,7 +2854,11 @@ const CSS = `
 .bp-modecard.alt .bp-modego{color:var(--navy);}
 
 /* data notice / passcode / howto */
-.bp-datanotice{display:flex; gap:8px; align-items:flex-start; font-size:12px; line-height:1.6; color:var(--ink-soft); background:var(--canvas); border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-top:16px;}
+.bp-datanotice{font-size:12px; line-height:1.6; color:var(--ink-soft); background:var(--canvas); border:1px solid var(--line); border-radius:8px; padding:9px 12px; margin-top:16px;}
+.bp-datanotice b{color:var(--ink);}
+.bp-datanotice details{margin-top:4px;}
+.bp-datanotice summary{cursor:pointer; color:var(--orange); font-weight:700; width:max-content;}
+.bp-datanotice ul{margin:6px 0 2px 18px;} .bp-datanotice li{margin-top:2px;}
 .bp-modalback{position:fixed; inset:0; z-index:100; background:rgba(19,32,45,.55); display:flex; align-items:center; justify-content:center; padding:16px;}
 .bp-modal{background:var(--paper); border-radius:12px; padding:24px; width:min(440px,100%); box-shadow:0 18px 50px rgba(0,0,0,.25); display:flex; flex-direction:column; gap:12px; border-top:5px solid var(--orange);}
 .bp-modal h2{font-size:19px; font-weight:900;}
@@ -2980,7 +2992,7 @@ textarea.bp-in{height:auto; padding:8px 9px; line-height:1.6; resize:vertical;}
 .bp-pfrank td.cost{color:var(--orange);}
 .bp-pfrank td .dim{color:var(--line);}
 .bp-mtag{font-weight:700;} .bp-mtag.hi{color:#2A7D5A;} .bp-mtag.lo{color:var(--orange);}
-.bp-vbadge{font-family:var(--font-jp); font-size:11px; font-weight:700; padding:3px 9px; border-radius:4px;}
+.bp-vbadge{display:inline-block; white-space:nowrap; font-family:var(--font-jp); font-size:13px; font-weight:700; line-height:1.4; padding:5px 12px; border-radius:5px; letter-spacing:.05em;}
 .bp-vbadge.focus{background:var(--orange); color:#fff;} .bp-vbadge.validate{background:#3E63C8; color:#fff;} .bp-vbadge.keep{background:var(--navy); color:#fff;} .bp-vbadge.exit{background:#C0503A; color:#fff;}
 .bp-mini{background:var(--paper); border:1px solid var(--line); font-family:var(--font-jp); font-size:11.5px; font-weight:700; padding:6px 10px; border-radius:5px; white-space:nowrap;}
 .bp-mini:hover{border-color:var(--orange); color:var(--orange);}
@@ -3027,6 +3039,9 @@ textarea.bp-in{height:auto; padding:8px 9px; line-height:1.6; resize:vertical;}
 .bp-lg.rA{background:#0E8F5E;} .bp-lg.rB{background:#16233F;} .bp-lg.rC{background:#B08322;} .bp-lg.rD{background:#C0642E;} .bp-lg.rE{background:#C0503A;}
 .bp-lgnote{font-size:11px; color:var(--ink-soft); margin-left:6px;}
 .bp-pfrank th.ac,.bp-pfrank td.ac{text-align:center;}
+/* 数値・ランク・判定の列は折り返さない（見出しの縦割れや「縮/小」の分断を防ぐ） */
+.bp-pfrank th{white-space:nowrap; font-size:11.5px;}
+.bp-pfrank td.n{white-space:nowrap;}
 .bp-axsub{display:block; font-family:var(--font-jp); font-size:9.5px; color:var(--ink-soft); font-weight:400; margin-top:2px;}
 .bp-fc3{font-family:var(--font-num); font-size:12.5px; font-weight:700; color:var(--navy);}
 .bp-flag.green{background:#E4F4EC; color:#0E8F5E;}
