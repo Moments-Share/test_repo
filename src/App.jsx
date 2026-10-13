@@ -3,6 +3,10 @@ import {
   ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine,
 } from "recharts";
 import * as XLSX from "xlsx";
+import {
+  STAGES, EVIDENCE, BIZ_TYPES, FREQ_TYPES, evidenceDesc, perYear, freqText, marginOf, hasDetail, missingRequired,
+  nextId, newRow, normalizeRow, exportCsv, templateCsv, rowsFromTable, decodeText, parseCsvText, mergeRows,
+} from "./bizRows.js";
 
 /* =========================================================================
    事業性検証スタジオ  ―  "いいね"で終わらせない。数字で語れる事業案を半日で。
@@ -127,15 +131,6 @@ const SYS_DECK =
   '形式:{"slides":[{"no":1,"title":"...","subtitle":"...","bullets":["...","..."],"speaker":"話すポイント"}]}';
 
 /* ---------- 進行中事業の整理モード ---------- */
-const PF_STAGES = ["構想", "検証", "立上げ", "拡大"];
-// 顧客にどこまで確かめたか（Evidenceの核）。選ぶだけで良いように段階化
-const EVIDENCE_LEVELS = [
-  "まだ顧客に聞いていない",
-  "顧客にヒアリングした",
-  "価格を提示した",
-  "見積・商談まで進んだ",
-  "有償で売れた（受注あり）",
-];
 const PF_SYS =
   "あなたは複数の新規事業を売上1億円規模まで育ててきた、経験豊富な事業家であり投資家です。市場起点で厳しく評価し、『作れるから作る』『原価を積み上げただけ』の楽観や思い込みを排します。同時に、まだ売上が立っていない検証段階の芽を、可能性で正しく見極めます。" +
   "『成功』の定義は、3年で売上1億円以上に到達できること。現在赤字・売上ゼロでも、1億円に届く現実的な道筋（十分な市場・妥当な価格・獲得の勝ち筋）が描けるなら前向きに、描けないなら畳む、という判断をします。" +
@@ -149,9 +144,10 @@ const PF_SYS =
   '"execLogic":["経営者への説明を5ステップで。1:現状(何がいくつ、多くは未収益)","2:全部は続けられない(リソースの現実)","3:だから1億到達の可能性で仕分ける","4:可能性はあるが未検証のものは実証(仮説→小さく試す→ダメなら早くやめる)","5:結論としてこのリソース配分にする"]}}';
 
 function emptyRows() {
-  return [0, 1, 2].map(() => ({ name: "", memo: "", value: "", vstatus: "", evidence: "", bizType: "BtoB", price: "", unitCost: "", freq: 1, team: "", resource: "", passion: 3, stage: "検証" }));
+  return [1, 2, 3].map((n) => newRow("B" + String(n).padStart(3, "0")));
 }
-const PF_SAMPLE = [
+// サンプルは旧形式（価値・補足・推進体制が別欄）のまま書き、normalizeRow で新形式へ移行して使う
+const PF_SAMPLE_LEGACY = [
   // 架空の部品メーカーの例（実在の企業・事業とは無関係）
   { name: "工場見学ツアー", team: "総務が兼任。現場は協力的だが本業を圧迫", memo: "工場見学＋ものづくり体験。単価UPの余地あり", value: "認知・採用・ファン化", vstatus: "有償で売れた（受注あり）", evidence: "リピート来訪あり・満足度高い。受入枠が少ない", bizType: "BtoC", price: 3000, unitCost: 1000, freq: 1, resource: 3, passion: 4, stage: "拡大" },
   { name: "試作品の短納期サービス", team: "営業部長が兼任。製造部の協力あり", memo: "既存の加工設備で他業種の試作を最短3日で", value: "設備稼働率の向上", vstatus: "見積・商談まで進んだ", evidence: "既存顧客3社から引き合い。価格は未確定", bizType: "BtoB", price: 300000, unitCost: 180000, freq: 4, resource: 4, passion: 4, stage: "検証" },
@@ -159,6 +155,7 @@ const PF_SAMPLE = [
   { name: "設備の予防保全IoT", team: "技術者1名が空き時間で開発", memo: "自社工場で使っているセンサー監視を外販", value: "自社の技術蓄積", vstatus: "顧客にヒアリングした", evidence: "同業5社に聞き、2社が関心。まだ販売前", bizType: "BtoB", price: 50000, unitCost: 15000, freq: 12, resource: 2, passion: 3, stage: "検証" },
   { name: "地域コラボ記念品", team: "広報が兼任。自治体の窓口は社長", memo: "自治体と組んだ記念グッズ。原価割れで販売中", value: "地域貢献・自治体連携", vstatus: "有償で売れた（受注あり）", evidence: "原価割れ・リピート弱い", bizType: "BtoC", price: 5500, unitCost: 7000, freq: 1, resource: 2, passion: 2, stage: "拡大" },
 ];
+const PF_SAMPLE = PF_SAMPLE_LEGACY.map((r, i) => normalizeRow(r, "B" + String(i + 1).padStart(3, "0")));
 function marginPct(rev, cost) {
   rev = Number(rev) || 0; cost = Number(cost) || 0;
   if (rev <= 0) return 0;
@@ -288,7 +285,7 @@ const EVAL_SYS =
   "重要な原則：あなたは点数を主観で決めません。入力された事実・証拠から、各小項目を下の基準表に厳密に照らして0〜5で判定し、根拠と不足証拠を必ず添えます。" +
   "『欲しい』と『買った』を区別し、社会的重要性ではなく顧客行動で判定。分からない項目は0点にせず status を 'unverified' にすること（未検証は減点でなくEvidence不足として扱う）。" +
   "入力の『顧客の検証状況』は支払意思(willingnessToPay)・顧客検証(customerValidation)・実績(traction)の判定根拠として重視：まだ聞いていない=低、ヒアリング=中、価格提示/見積=やや上、有償受注あり=高。" +
-  "実行・推進体制のうち推進オーナー・投入工数・巻き込み力は、入力の『推進体制』『投入リソース』『熱量』から判定し、記載がなければ unverified にする（製品より先に人を見る）。" +
+  "実行・推進体制のうち推進オーナー・投入工数・巻き込み力は、入力の『メモ』（推進体制の記述）『投入リソース』『熱量』から判定し、記載がなければ unverified にする（製品より先に人を見る）。" +
   "自社資産の活用(strategicFit)は、事業が自社の既存の技術・設備・販路・顧客基盤をどれだけ活かすかで判定する。" +
   "各小項目の source は 実績/顧客証拠/市場データ/AI推定 のいずれか（入力に無くAIが推定した値は必ず AI推定）。" +
   "\n【評価する" + ALL_SUBITEMS.length + "小項目と0〜5基準】\n" +
@@ -395,7 +392,7 @@ function bizToCandidate(b) {
   return {
     name: b.name, catch: b.memo || "進行中の事業", problem: "", customer: "",
     solution: b.memo || "", revenueModel: "", estRevenueY3: b.realY3 || b.revenue || 0, estInitialCost: 0,
-    grossMarginPct: b.margin, scores: {}, why: b.pathToTarget || b.evidence || "", risk: "",
+    grossMarginPct: b.margin, scores: {}, why: b.pathToTarget || "", risk: "",
   };
 }
 
@@ -554,11 +551,10 @@ export default function App() {
       const targetAmount = 100000000, targetLabel = "1億円"; // 成功ライン(固定)
       const user = "以下は現在並走している事業です。新規事業の成功＝3年で売上1億円以上、を念頭に、市場規模とニーズから多角的に評価し、選択と集中を判断してください。\n\n" +
         rows.map((r, i) => (i + 1) + ". " + r.name + "｜" + (r.memo || "") +
-          (r.value ? "｜数字以外の価値:" + r.value : "") +
-          (r.vstatus ? "｜検証状況:" + r.vstatus : "") + (r.evidence ? "（補足:" + r.evidence + "）" : "") +
-          (r.team ? "｜推進体制:" + r.team : "") +
+          (r.vstatus ? "｜検証状況:" + evidenceDesc(r.vstatus) : "") +
+          (r.note ? "｜メモ(数字以外の価値・手応え・推進体制など):" + r.note.replace(/\n/g, " / ") : "") +
           "｜形態:" + (r.bizType || "BtoB") + "｜売価:" + (Number(r.price) > 0 ? yen(r.price) : "未定") + "｜原価:" + (Number(r.unitCost) > 0 ? yen(r.unitCost) : "未定") +
-          "｜粗利率:" + (Number(r.price) > 0 ? marginPct(r.price, r.unitCost) + "%" : "—") + "｜頻度:" + (r.freq || 1) + "回/年" +
+          "｜粗利率:" + (Number(r.price) > 0 ? marginPct(r.price, r.unitCost) + "%" : "—") + "｜頻度:" + freqText(r) +
           "｜投入リソース:" + (r.resource || "?") + "人日/月｜熱量:" + r.passion + "/5｜ステージ:" + r.stage).join("\n");
       const j = parseJSON(await callClaude(PF_SYS, user));
       const aiMap = {};
@@ -566,20 +562,21 @@ export default function App() {
       const merged = rows.map((r) => {
         const ai = aiMap[r.name] || {};
         const margin = marginPct(r.price, r.unitCost);
-        const preRevenue = (r.stage === "構想" || r.stage === "検証");
+        const preRevenue = (r.stage === "アイデア" || r.stage === "検証");
         const base3 = Number(ai.base3) || Number(ai.realY3) || 0;
         const b = {
-          name: r.name, memo: r.memo, value: r.value || "", vstatus: r.vstatus || "", evidence: r.evidence || "", team: r.team || "",
-          bizType: r.bizType || "BtoB", price: Number(r.price) || 0, unitCost: Number(r.unitCost) || 0, freq: Number(r.freq) || 1,
+          id: r.id, name: r.name, memo: r.memo, note: r.note || "", vstatus: r.vstatus || "",
+          bizType: r.bizType || "BtoB", price: Number(r.price) || 0, unitCost: Number(r.unitCost) || 0,
+          freqType: r.freqType, freqCount: r.freqCount, freq: perYear(r),
           revenue: 0, cost: 0, profit: 0, margin, preRevenue,
           resource: Number(r.resource) || 0, passion: Number(r.passion) || 3, stage: r.stage,
           marketSize: Number(ai.marketSize) || 3, profitability: Number(ai.profitability) || (margin >= 40 ? 5 : margin >= 30 ? 4 : margin >= 20 ? 3 : margin >= 1 ? 2 : 1),
           barrier: Number(ai.barrier) || 3, uniqueness: Number(ai.uniqueness) || 3,
           som: Number(ai.som) || 0, low3: Number(ai.low3) || 0, base3, high3: Number(ai.high3) || 0, fcBasis: ai.fcBasis || "",
           growth: Number(ai.growth) || 3, fit: Number(ai.fit) || 3, resourceEfficiency: Number(ai.resourceEfficiency) || 3,
-          sellability: Number(ai.sellability) || 3, strategicValue: Number(ai.strategicValue) || (r.value ? 4 : 2),
+          sellability: Number(ai.sellability) || 3, strategicValue: Number(ai.strategicValue) || (r.note ? 3 : 2),
           potential: Number(ai.potential) || 3, realY3: base3, pathToTarget: ai.pathToTarget || "",
-          marketReality: ai.marketReality || "", otherValue: ai.otherValue || r.value || "",
+          marketReality: ai.marketReality || "", otherValue: ai.otherValue || "",
           reason: ai.reason || "",
         };
         b._reach = reachScore(b, targetAmount);
@@ -609,11 +606,10 @@ export default function App() {
       "事業名: " + b.name + "\n概要: " + (b.memo || "") +
       "\n提供形態: " + (b.bizType || "BtoB") +
       "\n売価: " + (Number(b.price) > 0 ? yen(b.price) : "未定") + " / 原価: " + (Number(b.unitCost) > 0 ? yen(b.unitCost) : "未定") +
-      " / 粗利率: " + (Number(b.price) > 0 ? b.margin + "%" : "—") + " / 購入頻度: " + (b.freq || 1) + "回/年" +
-      "\n顧客の検証状況: " + (b.vstatus || "未確認") + (b.evidence ? "（補足: " + b.evidence + "）" : "") +
-      "\n数字以外の価値: " + (b.value || "（なし）") +
-      "\nステージ: " + (b.stage || "") + " / 投入リソース: " + (b.resource || "?") + "人日/月" + " / 推進者の熱量: " + (b.passion || "?") + "/5" +
-      "\n推進体制: " + (b.team || "（未記入）");
+      " / 粗利率: " + (Number(b.price) > 0 ? b.margin + "%" : "—") + " / 購入頻度: " + freqText(b) +
+      "\n顧客の検証状況: " + evidenceDesc(b.vstatus) +
+      "\nメモ（数字以外の価値・手応え・推進体制など）: " + (b.note ? b.note.replace(/\n/g, " / ") : "（なし）") +
+      "\nステージ: " + (b.stage || "") + " / 投入リソース: " + (b.resource || "?") + "人日/月" + " / 推進者の熱量: " + (b.passion || "?") + "/5";
     const prevFacts = (deepEval && deepEval.addedFacts) || [];
     const allFacts = prevFacts.concat(addedFacts || []);
     const user = base + (allFacts.length ? "\n\n【壁打ちで追加で判明した事実】\n" + allFacts.map((f) => "・" + f).join("\n") : "");
@@ -664,7 +660,7 @@ export default function App() {
         name: b.name,
         text: "事業名: " + b.name + "\n概要: " + (b.memo || "") + "\nステージ: " + (b.stage || "") + " / 形態: " + (b.bizType || "") +
           "\n売価: " + (Number(b.price) > 0 ? yen(b.price) : "未定") + " / 粗利率: " + (Number(b.price) > 0 ? b.margin + "%" : "—") +
-          "\n顧客の検証状況: " + (b.vstatus || "未確認") + (b.evidence ? "（" + b.evidence + "）" : "") +
+          "\n顧客の検証状況: " + evidenceDesc(b.vstatus) + (b.note ? "\nメモ: " + b.note.replace(/\n/g, " / ") : "") +
           "\n1億到達可能性スコア: " + deepEval.score.total + "/100（カバレッジ" + deepEval.score.coverage + "%・Evidence Lv." + deepEval.ev + "）" +
           (d.conclusion ? "\n結論: " + d.conclusion : "") + (d.bottleneck ? "\n最大ボトルネック: " + d.bottleneck : "") +
           (d.criticalAssumption ? "\n崩れたら終わる前提: " + d.criticalAssumption : "") +
@@ -1403,106 +1399,239 @@ function Skeleton({ msg }) { return <div className="bp-skel"><div className="bp-
 function Overlay({ msg }) { return <div className="bp-overlay"><div className="bp-spinner big" /><p>{msg}</p></div>; }
 
 /* ========================= Portfolio Input ========================= */
+// 各欄の短い説明（ⓘ）。見出しは短く、補足はここへ
+const PF_TIPS = {
+  name: "いま並走している事業の名前",
+  bizType: "法人向け＝BtoB／個人向け＝BtoC",
+  price: "1回あたりの販売価格（円・税抜）。まだ売っていなければ想定価格",
+  unitCost: "1回あたりの原価（円）。分からなければ概算でOK",
+  freq: "1人の顧客が買う頻度。月額は年12回、年額・単発は年1回として計算",
+  stage: "どこまで進めたか（時系列）：アイデア → 検証 → 立ち上げ → 運用",
+  margin: "（売価−原価）÷売価。自動計算",
+  memo: "誰に・何を、をひとことで",
+  vstatus: "顧客にどこまで確かめたか（証拠の強さ）。ステージとは別に、未確認 → 受注あり で選ぶ",
+  passion: "推進する人の本気度。1＝低い 〜 5＝最優先",
+  resource: "毎月この事業に使っている工数（人日）",
+  note: "CSR・採用効果、何社に聞いたか、誰が推進するか など。AIの評価に使います",
+};
+function Tip({ text }) {
+  // ラベル内に置くので、クリックで入力欄が開かないよう既定動作を止めてツールチップだけ出す
+  return <span className="bp-tip" tabIndex={0} aria-label={text} onClick={(e) => { e.preventDefault(); e.currentTarget.focus(); }}>ⓘ<span className="bp-tipbox" role="tooltip">{text}</span></span>;
+}
+function FLabel({ k, children, req }) {
+  return <span className="bp-flab">{children}{req && <b className="bp-req">*</b>}<Tip text={PF_TIPS[k]} /></span>;
+}
+// 3桁カンマで表示し、値は数値で持つ（カーソル位置は数字の個数で保つ）
+function MoneyInput({ value, onChange, miss, label }) {
+  const ref = useRef();
+  const shown = value === "" || value == null ? "" : Number(value).toLocaleString("ja-JP");
+  function handle(e) {
+    const el = e.target, pos = el.selectionStart || 0;
+    const digitsBefore = el.value.slice(0, pos).replace(/[^0-9]/g, "").length;
+    const digits = el.value.normalize("NFKC").replace(/[^0-9]/g, "");
+    onChange(digits === "" ? "" : Number(digits));
+    requestAnimationFrame(() => {
+      const node = ref.current; if (!node) return;
+      let seen = 0, p = 0;
+      while (p < node.value.length && seen < digitsBefore) { if (/[0-9]/.test(node.value[p])) seen++; p++; }
+      node.setSelectionRange(p, p);
+    });
+  }
+  return (
+    <span className={"bp-money" + (miss ? " miss" : "")}>
+      <input ref={ref} className="bp-in num" type="text" inputMode="numeric" aria-label={label} value={shown} placeholder="0" onChange={handle} />
+      <em>円</em>
+    </span>
+  );
+}
+
+function BizRow({ r, set, onDelete, open, onToggle, showMiss }) {
+  const m = marginOf(r);
+  const miss = showMiss ? missingRequired(r) : [];
+  const mc = (label) => (miss.includes(label) ? " miss" : "");
+  const detail = hasDetail(r);
+  return (
+    <div className={"bp-bizrow" + (open ? " open" : "")}>
+      <div className="bp-bizmain">
+        <label className={"c-name" + mc("事業名")}><FLabel k="name" req>事業名</FLabel>
+          <input className="bp-in name" value={r.name} placeholder="例）試作品の短納期サービス" onChange={(e) => set({ name: e.target.value })} />
+        </label>
+        <label className={"c-type" + mc("形態")}><FLabel k="bizType" req>形態</FLabel>
+          <select className="bp-in" value={r.bizType} onChange={(e) => set({ bizType: e.target.value })}>
+            {BIZ_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </label>
+        <label className={"c-price" + mc("売価")}><FLabel k="price" req>売価</FLabel>
+          <MoneyInput label="売価" value={r.price} onChange={(v) => set({ price: v })} />
+        </label>
+        <label className={"c-cost" + mc("原価")}><FLabel k="unitCost" req>原価</FLabel>
+          <MoneyInput label="原価" value={r.unitCost} onChange={(v) => set({ unitCost: v })} />
+        </label>
+        <div className={"c-freq" + mc("頻度")}><FLabel k="freq" req>頻度</FLabel>
+          <span className="bp-freq">
+            <select className="bp-in" aria-label="頻度種別" value={r.freqType}
+              onChange={(e) => set({ freqType: e.target.value, freqCount: e.target.value === "perYear" ? (r.freqCount || 2) : "" })}>
+              {FREQ_TYPES.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
+            </select>
+            {r.freqType === "perYear" && (
+              <span className="bp-freqn"><input className="bp-in num" type="number" min="1" aria-label="年あたり回数" value={r.freqCount}
+                onChange={(e) => set({ freqCount: e.target.value === "" ? "" : Number(e.target.value) })} /><em>回</em></span>
+            )}
+          </span>
+        </div>
+        <label className={"c-stage" + mc("ステージ")}><FLabel k="stage" req>ステージ</FLabel>
+          <select className="bp-in" value={r.stage} onChange={(e) => set({ stage: e.target.value })}>
+            {STAGES.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </label>
+        <div className="c-margin"><FLabel k="margin">粗利率</FLabel>
+          <output className={"bp-marginv" + (m != null && m < 0 ? " neg" : "")}>{m == null ? "—" : m + "%"}</output>
+        </div>
+        <div className="c-more">
+          <button type="button" className="bp-moretoggle" aria-expanded={open} onClick={onToggle}>
+            {open ? "▾ 詳細を閉じる" : "▸ 詳細を追加"}
+          </button>
+          {!open && detail && <span className="bp-detailbadge" title="詳細に入力があります">詳細あり</span>}
+        </div>
+        <div className="c-del"><button type="button" className="bp-del" onClick={onDelete} title="この事業を削除" aria-label="この事業を削除">×</button></div>
+      </div>
+      {open && (
+        <div className="bp-bizdetail">
+          <label className="d-memo"><FLabel k="memo">概要</FLabel>
+            <input className="bp-in" value={r.memo} placeholder="例）既存の加工設備で他業種の試作を最短3日で" onChange={(e) => set({ memo: e.target.value })} />
+          </label>
+          <label className="d-vstatus"><FLabel k="vstatus">検証状況</FLabel>
+            <select className="bp-in" value={r.vstatus} onChange={(e) => set({ vstatus: e.target.value })}>
+              <option value="">選択してください</option>
+              {EVIDENCE.map((ev) => <option key={ev.label} value={ev.label}>{ev.label}</option>)}
+            </select>
+          </label>
+          <div className="d-passion"><FLabel k="passion">熱量</FLabel>
+            <span className="bp-seg" role="group" aria-label="熱量">
+              {[1, 2, 3, 4, 5].map((n) => (
+                <button type="button" key={n} className={r.passion === n ? "on" : ""} aria-pressed={r.passion === n} onClick={() => set({ passion: n })}>{n}</button>
+              ))}
+            </span>
+          </div>
+          <label className="d-resource"><FLabel k="resource">リソース（人日/月）</FLabel>
+            <input className="bp-in num" type="number" min="0" value={r.resource} placeholder="—" onChange={(e) => set({ resource: e.target.value === "" ? "" : Number(e.target.value) })} />
+          </label>
+          <label className="d-note"><FLabel k="note">メモ</FLabel>
+            <textarea className="bp-in" rows={3} value={r.note} placeholder="CSR・採用効果、何社に聞いたか、誰が推進するか など" onChange={(e) => set({ note: e.target.value })} />
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function downloadText(text, filename) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/csv;charset=utf-8" }));
+  const a = document.createElement("a"); a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function PortfolioInput({ rows, setRows, target, setTarget, onSubmit, loading, onBack }) {
-  const fileRef = useRef(); const [fileName, setFileName] = useState("");
-  function setCell(i, k, v) { setRows(rows.map((r, idx) => idx === i ? { ...r, [k]: v } : r)); }
-  function addRow() { setRows([...rows, { name: "", memo: "", value: "", vstatus: "", evidence: "", bizType: "BtoB", price: "", unitCost: "", freq: 1, team: "", resource: "", passion: 3, stage: "検証" }]); }
-  function delRow(i) { setRows(rows.filter((_, idx) => idx !== i)); }
+  const fileRef = useRef();
+  const [openIds, setOpenIds] = useState({});
+  const [showMiss, setShowMiss] = useState(false);
+  const [report, setReport] = useState(null); // { file, added, updated, errors, warnings }
+
+  function setRow(id, patch) { setRows(rows.map((r) => (r.id === id ? { ...r, ...patch } : r))); }
+  function addRow() { const id = nextId(rows); setRows([...rows, newRow(id)]); }
+  function delRow(id) { setRows(rows.filter((r) => r.id !== id)); }
+  function toggle(id) { setOpenIds((o) => ({ ...o, [id]: !o[id] })); }
+
   function handleFile(e) {
     const f = e.target.files && e.target.files[0]; if (!f) return;
-    setFileName(f.name);
+    e.target.value = "";
     const reader = new FileReader();
     reader.onload = (ev) => {
       try {
-        const wb = XLSX.read(new Uint8Array(ev.target.result), { type: "array" });
-        const arr = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: "" });
-        const mapped = arr.map((o) => {
-          const g = (keys) => { for (const k of Object.keys(o)) { if (keys.some((x) => k.includes(x))) return o[k]; } return ""; };
-          return {
-            name: g(["事業", "名", "name"]) || "", memo: g(["概要", "メモ", "説明", "memo"]) || "",
-            value: g(["価値", "意義", "非財務", "CSR", "value"]) || "",
-            vstatus: g(["検証状況", "検証レベル"]) || "",
-            evidence: g(["手応え", "補足", "エビデンス", "反応", "実績", "evidence"]) || "",
-            team: g(["推進体制", "体制", "担当", "オーナー", "team"]) || "",
-            bizType: /c/i.test(String(g(["形態", "BtoC", "BtoB", "type"]))) && !/b\s*to\s*b/i.test(String(g(["形態", "type"]))) ? "BtoC" : "BtoB",
-            price: Number(String(g(["売価", "単価", "価格", "price"])).replace(/[^0-9.]/g, "")) || "",
-            unitCost: Number(String(g(["原価", "コスト", "cost"])).replace(/[^0-9.]/g, "")) || "",
-            freq: Number(String(g(["頻度", "回数", "freq"])).replace(/[^0-9.]/g, "")) || 1,
-            resource: Number(String(g(["リソース", "工数", "人", "resource"])).replace(/[^0-9.]/g, "")) || "",
-            passion: Number(String(g(["熱量", "passion"])).replace(/[^0-9.]/g, "")) || 3,
-            stage: g(["ステージ", "段階", "stage"]) || "検証",
-          };
-        }).filter((r) => r.name);
-        if (mapped.length) setRows(mapped);
-      } catch (err) { setFileName(f.name + "（読み込み失敗）"); }
+        let res;
+        if (/\.csv$/i.test(f.name)) res = parseCsvText(decodeText(ev.target.result));
+        else {
+          const wb = XLSX.read(new Uint8Array(ev.target.result), { type: "array" });
+          const table = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "", raw: false });
+          res = rowsFromTable(table);
+        }
+        const merged = mergeRows(rows, res.rows);
+        if (res.rows.length) setRows(merged.rows);
+        setReport({ file: f.name, added: merged.added, updated: merged.updated, errors: res.errors, warnings: res.warnings });
+      } catch (err) {
+        setReport({ file: f.name, added: 0, updated: 0, errors: [{ line: "—", reason: "ファイルを読み込めませんでした（" + err.message + "）" }], warnings: [] });
+      }
     };
     reader.readAsArrayBuffer(f);
   }
-  const filled = rows.filter((r) => r.name && String(r.name).trim()).length;
+  function exportNow() {
+    const d = new Date(), ymd = d.getFullYear() + String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0");
+    downloadText(exportCsv(rows), "事業一覧_" + ymd + ".csv");
+  }
+
+  const named = rows.filter((r) => r.name && String(r.name).trim());
+  const incomplete = named.filter((r) => missingRequired(r).length);
+  function submit() {
+    if (incomplete.length) { setShowMiss(true); return; }
+    onSubmit();
+  }
+
   return (
     <section className="bp-screen">
-      <SectionLabel tag="STEP 01" title="進行中の事業を入力する" sub="いま並走している事業を並べます。売上がまだ無い・検証中でもOK（年商・原価は任意）。「顧客にどこまで確かめたか（検証状況）」を選ぶだけで、AIが市場規模から悲観・普通・楽観の売上予測と評価を出します。情報が足りない分は後でAIが壁打ちで聞きます。" />
+      <SectionLabel tag="STEP 01" title="進行中の事業を入力する" sub="まずは必須の6項目（＊）だけでOK。概要・検証状況・メモなどは「▸ 詳細を追加」から。情報が足りない分は後でAIが壁打ちで聞きます。" />
 
-      <div className="bp-pftable">
-        <div className="bp-pfhead">
-          <span className="c-name">事業名 / 概要 / 数字以外の価値 / 検証状況</span>
-          <span className="c-type">形態</span><span className="c-num">売価<em>単位</em></span><span className="c-num">原価<em>単位</em></span><span className="c-num">粗利率</span><span className="c-freq">頻度<em>回/年</em></span>
-          <span className="c-res">リソース<em>人日/月</em></span><span className="c-pass">熱量</span><span className="c-stage">ステージ</span><span className="c-del" />
+      <div className="bp-biztable">
+        <div className="bp-bizhead" aria-hidden="true">
+          <span className="c-name">事業名<b className="bp-req">*</b><Tip text={PF_TIPS.name} /></span>
+          <span className="c-type">形態<b className="bp-req">*</b><Tip text={PF_TIPS.bizType} /></span>
+          <span className="c-price">売価<b className="bp-req">*</b><Tip text={PF_TIPS.price} /></span>
+          <span className="c-cost">原価<b className="bp-req">*</b><Tip text={PF_TIPS.unitCost} /></span>
+          <span className="c-freq">頻度<b className="bp-req">*</b><Tip text={PF_TIPS.freq} /></span>
+          <span className="c-stage">ステージ<b className="bp-req">*</b><Tip text={PF_TIPS.stage} /></span>
+          <span className="c-margin">粗利率<Tip text={PF_TIPS.margin} /></span>
+          <span className="c-more" /><span className="c-del" />
         </div>
-        {rows.map((r, i) => {
-          const m = marginPct(r.price, r.unitCost);
-          const hasPrice = Number(r.price) > 0;
-          return (
-            <div className="bp-pfrow" key={i}>
-              <span className="c-name">
-                <input className="bp-in name" value={r.name} placeholder="事業名" onChange={(e) => setCell(i, "name", e.target.value)} />
-                <input className="bp-in memo" value={r.memo} placeholder="ひとこと概要（誰に・何を）" onChange={(e) => setCell(i, "memo", e.target.value)} />
-                <input className="bp-in value" value={r.value || ""} placeholder="数字以外の価値：CSR / 地域 / 採用 / 技術 / 現場の熱 など" onChange={(e) => setCell(i, "value", e.target.value)} />
-                <select className={"bp-in vstatus" + (r.vstatus ? " set" : "")} value={r.vstatus || ""} onChange={(e) => setCell(i, "vstatus", e.target.value)}>
-                  <option value="">顧客にどこまで確かめた？（検証状況）</option>
-                  {EVIDENCE_LEVELS.map((lv, k) => <option key={k} value={lv}>{k + 1 + "．" + lv}</option>)}
-                </select>
-                <input className="bp-in evidence" value={r.evidence || ""} placeholder="補足：何社に聞いた・受注数・反応など（任意）" onChange={(e) => setCell(i, "evidence", e.target.value)} />
-                <input className="bp-in team" value={r.team || ""} placeholder="推進体制：オーナー・専任/兼任・決裁者との距離・協力部署（任意）" onChange={(e) => setCell(i, "team", e.target.value)} />
-              </span>
-              <span className="c-type">
-                <select className="bp-in" value={r.bizType || "BtoB"} onChange={(e) => setCell(i, "bizType", e.target.value)}>
-                  <option value="BtoB">BtoB</option><option value="BtoC">BtoC</option>
-                </select>
-              </span>
-              <span className="c-num"><input className="bp-in" type="number" value={r.price} placeholder="円" onChange={(e) => setCell(i, "price", e.target.value)} /></span>
-              <span className="c-num"><input className="bp-in" type="number" value={r.unitCost} placeholder="円" onChange={(e) => setCell(i, "unitCost", e.target.value)} /></span>
-              <span className={"c-num bp-margin" + (hasPrice && m < 0 ? " neg" : "")}>{hasPrice ? m + "%" : "—"}</span>
-              <span className="c-freq"><input className="bp-in" type="number" value={r.freq} placeholder="1" onChange={(e) => setCell(i, "freq", e.target.value)} /></span>
-              <span className="c-res"><input className="bp-in" type="number" value={r.resource} placeholder="—" onChange={(e) => setCell(i, "resource", e.target.value)} /></span>
-              <span className="c-pass">
-                <select className="bp-in" value={r.passion} onChange={(e) => setCell(i, "passion", Number(e.target.value))}>
-                  {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
-                </select>
-              </span>
-              <span className="c-stage">
-                <select className="bp-in" value={r.stage} onChange={(e) => setCell(i, "stage", e.target.value)}>
-                  {PF_STAGES.map((s) => <option key={s} value={s}>{s}</option>)}
-                </select>
-              </span>
-              <span className="c-del"><button className="bp-del" onClick={() => delRow(i)} title="削除">×</button></span>
-            </div>
-          );
-        })}
+        {rows.map((r) => (
+          <BizRow key={r.id} r={r} set={(p) => setRow(r.id, p)} onDelete={() => delRow(r.id)}
+            open={!!openIds[r.id]} onToggle={() => toggle(r.id)} showMiss={showMiss && !!(r.name && String(r.name).trim())} />
+        ))}
       </div>
 
       <div className="bp-pftools">
         <button className="bp-ghost" onClick={addRow}>＋ 事業を追加</button>
-        <div className="bp-upload sm" onClick={() => fileRef.current && fileRef.current.click()}>
-          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} hidden />
-          <span className="bp-upicon">⇪</span><div><strong>Excel / CSV 取込</strong><p>{fileName || "事業一覧シートを読み込み"}</p></div>
-        </div>
-        <button className="bp-ghost" onClick={() => setRows(PF_SAMPLE.map((x) => ({ ...x })))}>サンプル（実例）</button>
+        <button className="bp-ghost" onClick={() => fileRef.current && fileRef.current.click()}>⇪ CSV / Excel を読み込む</button>
+        <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" onChange={handleFile} hidden />
+        <button className="bp-ghost" onClick={exportNow} disabled={!named.length}>⇩ CSVで書き出す</button>
+        <button className="bp-ghost" onClick={() => downloadText(templateCsv(), "事業一覧_テンプレート.csv")}>テンプレートCSVをダウンロード</button>
+        <button className="bp-ghost" onClick={() => { setRows(PF_SAMPLE.map((x) => ({ ...x }))); setReport(null); }}>サンプル</button>
       </div>
+
+      {report && (
+        <div className={"bp-importreport" + (report.errors.length ? " haserr" : "")} role="status">
+          <div className="bp-irhead">
+            <strong>{report.file}：{report.added + report.updated}件を取り込みました（新規 {report.added}・更新 {report.updated}）{report.errors.length ? "／" + report.errors.length + "件は読み込めませんでした" : ""}</strong>
+            <button className="bp-errclose" onClick={() => setReport(null)} aria-label="閉じる">×</button>
+          </div>
+          {report.errors.length > 0 && (
+            <table className="bp-irtable"><thead><tr><th>行</th><th>事業名</th><th>読み込めなかった理由</th></tr></thead>
+              <tbody>{report.errors.map((e, i) => <tr key={i}><td>{e.line}</td><td>{e.name || "—"}</td><td>{e.reason}</td></tr>)}</tbody></table>
+          )}
+          {report.warnings.length > 0 && (
+            <ul className="bp-irwarn">{report.warnings.map((w, i) => <li key={i}>{w.line}行目（{w.name}）：{w.reason}</li>)}</ul>
+          )}
+        </div>
+      )}
+
+      {showMiss && incomplete.length > 0 && (
+        <div className="bp-error inline" role="alert">
+          必須項目が未入力です：{incomplete.map((r) => r.name + "（" + missingRequired(r).join("・") + "）").join("、")}
+        </div>
+      )}
 
       <div className="bp-actionbar split">
         <button className="bp-ghost" onClick={onBack}>← モード選択へ</button>
-        <button className="bp-cta" disabled={!filled || loading} onClick={onSubmit}>{loading ? "整理中…" : "多角的に整理する →"}</button>
+        <button className="bp-cta" disabled={!named.length || loading} onClick={submit}>{loading ? "整理中…" : "多角的に整理する →"}</button>
       </div>
     </section>
   );
@@ -2584,24 +2713,78 @@ const CSS = `
 .bp-modecard.alt .bp-modego{color:var(--navy);}
 
 /* portfolio input */
-.bp-pftable{border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--paper);}
-.bp-pfhead,.bp-pfrow{display:grid; grid-template-columns:2.3fr 0.8fr 0.9fr 0.9fr 0.7fr 0.7fr 0.8fr 0.6fr 0.9fr 0.4fr; gap:8px; align-items:center; padding:10px 12px;}
-.bp-pfhead{background:var(--navy); color:#fff; font-size:11px; font-weight:700;}
-.bp-pfhead em{font-style:normal; font-weight:400; color:var(--steel-l); font-size:10px; margin-left:3px;}
-.bp-pfhead .c-num,.bp-pfhead .c-res,.bp-pfhead .c-pass,.bp-pfhead .c-type,.bp-pfhead .c-freq{text-align:center;}
-.bp-margin.neg{color:#C0503A;}
-.bp-pfrow{border-top:1px solid var(--canvas);}
-.bp-pfrow .c-name{display:flex; flex-direction:column; gap:4px;}
-.bp-in{width:100%; font-family:inherit; font-size:13px; padding:7px 9px; border:1px solid var(--line); border-radius:5px; background:var(--paper);}
-.bp-in:focus{outline:none; border-color:var(--orange);}
-.bp-in.name{font-weight:700;} .bp-in.memo{font-size:11.5px; color:var(--ink-soft);}
-.c-num .bp-in,.c-res .bp-in{text-align:right; font-family:var(--font-num);}
-.bp-margin{text-align:center; font-family:var(--font-num); font-weight:700; color:var(--navy);}
-.bp-del{background:none; border:none; color:var(--steel); font-size:18px; line-height:1;}
-.bp-del:hover{color:var(--orange);}
-.bp-pftools{display:flex; gap:12px; align-items:center; margin-top:14px; flex-wrap:wrap;}
-.bp-upload.sm{flex:1; min-width:220px; padding:11px 14px;}
-.bp-upload.sm p{font-size:11px;}
+.bp-biztable{border:1px solid var(--line); border-radius:8px; background:var(--paper);}
+.bp-bizhead,.bp-bizmain{display:grid; grid-template-columns:minmax(140px,2fr) 82px 122px 122px 150px 100px 58px 172px 28px; gap:8px; align-items:center;}
+.bp-bizhead{background:var(--navy); color:#fff; font-size:11.5px; font-weight:700; padding:9px 12px; border-radius:8px 8px 0 0;}
+.bp-bizhead .bp-tip{color:var(--steel-l);}
+.bp-bizrow{position:relative; border-top:1px solid var(--line); padding:7px 12px;}
+.bp-bizrow:first-of-type{border-top:none;}
+.bp-bizrow.open{background:#FAFBFC;}
+.bp-bizmain > *{min-width:0;}
+.bp-flab{position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap;}
+.bp-req{color:var(--danger); margin-left:2px; font-weight:700;}
+.bp-in{width:100%; font-family:inherit; font-size:13px; height:34px; padding:0 9px; border:1px solid var(--line); border-radius:5px; background:var(--paper); color:var(--ink);}
+textarea.bp-in{height:auto; padding:8px 9px; line-height:1.6; resize:vertical;}
+.bp-in:focus{outline:none; border-color:var(--orange); box-shadow:0 0 0 2px var(--orange-soft);}
+.bp-in.name{font-weight:700;}
+.bp-in.num{text-align:right; font-family:var(--font-num); -moz-appearance:textfield;}
+.bp-in.num::-webkit-inner-spin-button,.bp-in.num::-webkit-outer-spin-button{-webkit-appearance:none; margin:0;}
+.miss .bp-in,.miss .bp-money .bp-in{border-color:var(--danger); background:#FDF1EE;}
+.bp-money{position:relative; display:block;}
+.bp-money .bp-in{padding-right:24px;}
+.bp-money em,.bp-freqn em{position:absolute; right:8px; top:50%; transform:translateY(-50%); font-style:normal; font-size:11px; color:var(--ink-soft); pointer-events:none;}
+.bp-freq{display:flex; gap:4px;}
+.bp-freq select{flex:1; min-width:0;}
+.bp-freqn{position:relative; width:62px; flex-shrink:0;}
+.bp-freqn .bp-in{padding-right:20px;}
+.bp-marginv{display:block; text-align:right; font-family:var(--font-num); font-weight:700; font-size:14px; color:var(--navy); padding-right:2px;}
+.bp-marginv.neg{color:var(--danger);}
+.c-more{display:flex; align-items:center; gap:6px;}
+.bp-moretoggle{background:none; border:none; padding:4px 0; font-size:12px; font-weight:700; color:var(--orange); white-space:nowrap;}
+.bp-moretoggle:hover{text-decoration:underline;}
+.bp-detailbadge{font-size:10px; font-weight:700; color:#2A7D5A; background:#E3F3EA; border-radius:999px; padding:1px 7px; white-space:nowrap;}
+.bp-del{background:none; border:none; color:var(--steel); font-size:18px; line-height:1; width:28px; height:28px;}
+.bp-del:hover{color:var(--danger);}
+.bp-bizdetail{display:grid; grid-template-columns:minmax(0,2fr) minmax(0,1fr) auto 130px; grid-template-areas:"memo vstatus passion resource" "note note note note"; gap:10px 14px; margin-top:10px; padding:12px 0 6px; border-top:1px dashed var(--line);}
+.bp-bizdetail .bp-flab{position:static; width:auto; height:auto; overflow:visible; clip:auto; display:flex; align-items:center; font-size:11px; font-weight:700; color:var(--ink-soft); margin-bottom:4px;}
+.d-memo{grid-area:memo;} .d-vstatus{grid-area:vstatus;} .d-passion{grid-area:passion;} .d-resource{grid-area:resource;} .d-note{grid-area:note;}
+.bp-bizdetail label,.bp-bizdetail > div{display:block; min-width:0;}
+.bp-seg{display:inline-flex; border:1px solid var(--line); border-radius:6px; overflow:hidden; height:34px;}
+.bp-seg button{width:34px; border:none; border-left:1px solid var(--line); background:var(--paper); font-family:var(--font-num); font-size:13px; font-weight:700; color:var(--ink-soft);}
+.bp-seg button:first-child{border-left:none;}
+.bp-seg button.on{background:var(--orange); color:#fff;}
+.bp-seg button:focus-visible{outline:2px solid var(--orange); outline-offset:-2px;}
+.bp-tip{position:relative; display:inline-flex; margin-left:4px; font-size:11px; font-weight:400; color:var(--steel); cursor:help;}
+.bp-tip:focus{outline:none; color:var(--orange);}
+.bp-tipbox{display:none; position:absolute; top:calc(100% + 6px); left:-8px; z-index:30; width:max-content; max-width:240px; background:var(--ink); color:#fff; font-size:11.5px; font-weight:400; line-height:1.55; padding:7px 10px; border-radius:6px; white-space:normal; text-align:left; box-shadow:0 6px 18px rgba(0,0,0,.18);}
+.bp-tip:hover .bp-tipbox,.bp-tip:focus .bp-tipbox{display:block;}
+.bp-bizhead .c-margin .bp-tipbox,.bp-bizhead .c-stage .bp-tipbox{left:auto; right:-8px;}
+.bp-pftools{display:flex; gap:10px; align-items:center; margin-top:14px; flex-wrap:wrap;}
+.bp-importreport{margin-top:14px; border:1px solid #BFE0CC; background:#F1FAF4; border-radius:8px; padding:12px 14px; font-size:13px;}
+.bp-importreport.haserr{border-color:#EEBBA4; background:#FFF7F3;}
+.bp-irhead{display:flex; gap:10px; align-items:flex-start;}
+.bp-irtable{width:100%; border-collapse:collapse; margin-top:10px; font-size:12.5px;}
+.bp-irtable th{text-align:left; font-size:11px; color:var(--ink-soft); padding:5px 6px; border-bottom:1px solid var(--line);}
+.bp-irtable td{padding:6px; border-bottom:1px solid var(--line); vertical-align:top;}
+.bp-irtable td:first-child{white-space:nowrap; font-family:var(--font-num);}
+.bp-irwarn{margin:8px 0 0 18px; font-size:12px; color:var(--ink-soft);}
+.bp-error.inline{margin-top:14px; border:1px solid #EEBBA4; border-radius:8px;}
+@media(max-width:960px){
+  .bp-bizhead{display:none;}
+  .bp-bizrow{padding:12px;}
+  .bp-bizrow:first-of-type{border-radius:8px 8px 0 0;}
+  .bp-bizmain{grid-template-columns:1fr 1fr; grid-template-areas:"name name" "type stage" "price cost" "freq margin" "more del"; gap:8px 10px;}
+  .bp-bizmain .c-name{grid-area:name;} .bp-bizmain .c-type{grid-area:type;} .bp-bizmain .c-stage{grid-area:stage;}
+  .bp-bizmain .c-price{grid-area:price;} .bp-bizmain .c-cost{grid-area:cost;} .bp-bizmain .c-freq{grid-area:freq;}
+  .bp-bizmain .c-margin{grid-area:margin;} .bp-bizmain .c-more{grid-area:more;} .bp-bizmain .c-del{grid-area:del; justify-self:end;}
+  .bp-bizmain .bp-flab{position:static; width:auto; height:auto; overflow:visible; clip:auto; display:flex; align-items:center; font-size:11px; font-weight:700; color:var(--ink-soft); margin-bottom:3px;}
+  .bp-bizmain .c-margin .bp-marginv{text-align:left; line-height:34px;}
+  .bp-bizdetail{grid-template-columns:1fr; grid-template-areas:"memo" "vstatus" "passion" "resource" "note";}
+  .bp-seg{display:flex; width:100%;} .bp-seg button{flex:1; width:auto;}
+  .c-more{flex-wrap:wrap;}
+  .bp-tip{position:static;}
+  .bp-tipbox,.bp-bizhead .c-margin .bp-tipbox,.bp-bizhead .c-stage .bp-tipbox{left:12px; right:12px; top:auto; width:auto; max-width:none; margin-top:24px;}
+}
 
 /* portfolio board */
 .bp-pfsummary{display:grid; grid-template-columns:repeat(5,1fr); gap:10px; margin-bottom:16px;}
@@ -2798,13 +2981,7 @@ const CSS = `
 .bp-dots{letter-spacing:-1px;} .bp-dots.lo{color:#C0503A;}
 .bp-stars{color:#B08322; letter-spacing:-1px;} .bp-stars .dim{color:var(--line);}
 .bp-choicerow.one{grid-template-columns:1fr; margin-bottom:18px;}
-.bp-in.value{font-size:12px; color:#8A6A2B;}
-.bp-in.evidence{font-size:12px; color:#2A5F8F;}
-.bp-in.team{font-size:12px; color:#3D6B4F;}
-.bp-in.vstatus{font-size:12px; color:var(--ink-soft); border-color:var(--line); background:var(--canvas);}
-.bp-in.vstatus.set{color:var(--blue); font-weight:700; border-color:var(--blue); background:var(--blue-soft);}
 .bp-pretag{font-family:var(--font-jp); font-size:10.5px; font-weight:700; color:#3E63C8; background:#E7ECFA; padding:2px 7px; border-radius:4px;}
-.bp-pfhead .c-num em{font-style:normal; font-weight:400; font-size:9.5px; opacity:.7; margin-left:3px;}
 .bp-nfgrid{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:14px;}
 .bp-nfcard{background:#FBF6EA; border:1px solid #EBDCBF; border-radius:8px; padding:14px 16px;}
 .bp-nfhd{display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px;}
@@ -2919,7 +3096,6 @@ const CSS = `
   .bp-pfsummary{grid-template-columns:1fr 1fr 1fr;}
   .bp-stepper{display:none;}
   .bp-stations{flex-direction:column;} .bp-stchev{transform:rotate(90deg); align-self:center;}
-  .bp-pftable{overflow-x:auto;} .bp-pfhead,.bp-pfrow{min-width:900px;}
   .bp-pfrank.wide{display:block; overflow-x:auto; white-space:nowrap;}
   .bp-proglabel{font-size:12px;} .bp-progline{min-width:10px; margin:0 7px;}
 }
