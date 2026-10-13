@@ -52,6 +52,8 @@ async function callClaude(system, user, maxTokens) {
       setPasscode(code.trim());
       continue;
     }
+    // 混雑（429/529）は少し待って最大2回やり直す
+    if ((res.status === 429 || res.status === 529) && attempt < 2) { await new Promise((r) => setTimeout(r, 4000 * (attempt + 1))); continue; }
     if (!res.ok || !data) throw new Error(friendlyError(res.status, data));
     const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
     return { text, truncated: data.stop_reason === "max_tokens" };
@@ -72,6 +74,19 @@ async function askJSON(system, user, maxTokens) {
     limit = Math.min(limit * 2, 8000);
   }
   throw new Error("AIの回答を最後まで読み取れませんでした。入力する事業の数を減らすか、もう一度お試しください。");
+}
+// 同時に投げる数を絞って並列実行（APIの1分あたりの上限に当たりにくくする）。結果は入力順、失敗は { error }
+async function runPool(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      try { out[i] = { value: await fn(items[i], i) }; } catch (e) { out[i] = { error: e }; }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
 }
 
 /* ---------- format ---------- */
@@ -160,14 +175,22 @@ const SYS_DECK =
   '形式:{"slides":[{"no":1,"title":"...","subtitle":"...","bullets":["...","..."],"speaker":"話すポイント"}]}';
 
 /* ---------- 進行中事業の整理モード ---------- */
-const PF_SYS =
+// 進行中事業の評価は「1事業ずつ（並列）」と「全体診断」に分けて頼む。1回で全部書かせるより速い
+const PF_ROLE =
   "あなたは複数の新規事業を売上1億円規模まで育ててきた、経験豊富な事業家であり投資家です。市場起点で厳しく評価し、『作れるから作る』『原価を積み上げただけ』の楽観や思い込みを排します。同時に、まだ売上が立っていない検証段階の芽を、可能性で正しく見極めます。" +
-  "『成功』の定義は、3年で売上1億円以上に到達できること。現在赤字・売上ゼロでも、1億円に届く現実的な道筋（十分な市場・妥当な価格・獲得の勝ち筋）が描けるなら前向きに、描けないなら畳む、という判断をします。" +
+  "『成功』の定義は、3年で売上1億円以上に到達できること。現在赤字・売上ゼロでも、1億円に届く現実的な道筋（十分な市場・妥当な価格・獲得の勝ち筋）が描けるなら前向きに、描けないなら畳む、という判断をします。";
+const PF_ONE_SYS =
+  PF_ROLE +
+  "与えられた1つの事業だけを評価します。" +
   "各事業を次の4項目で1〜5点で採点（総合スコアとA〜Eランク＝継続/撤退の根拠）：marketSize=市場規模(1億円を狙えるだけの市場・ニーズがあるか)、profitability=利益率(原価と市場が払う価格から見て儲かる構造か)、barrier=参入障壁(真似されにくさ・堀)、uniqueness=独自性(自社ならではの強みか)。" +
   "さらに市場規模とニーズから売上予測を出します：som=現実的に獲得しうる市場規模(円)、low3/base3/high3=3年後の到達売上の3シナリオ(悲観/普通/楽観, 円, 顧客数×単価×頻度や獲得率で概算)、fcBasis=その予測根拠(1文, 例『客数◯×単価◯×年◯回、獲得率◯%』)。base3(普通)を現実的な本命値とすること。" +
-  "出力はJSONのみ。前置き・マークダウン・コードフェンス禁止。" +
-  '形式:{"businesses":[{"name":"事業名","marketSize":1-5,"profitability":1-5,"barrier":1-5,"uniqueness":1-5,"som":獲得可能市場_円,"low3":保守_円,"base3":標準_円,"high3":強気_円,"fcBasis":"予測根拠(1文)","pathToTarget":"1億に届く条件(1文)","sellability":1-5,"strategicValue":1-5,"growth":1-5,"marketReality":"原価と市場評価/売れる構造の一言","otherValue":"数字に出ない価値・残す理由(なければ空文字)","reason":"プロとしての評価の要点(1文)"}],' +
-  '"portfolio":{"diagnosis":"プロ視点の全体診断(2-3文)。1億到達の可能性・売れる構造・リソース分散の観点で。","reallocation":[{"from":"減らす/畳む事業","to":"寄せる先の事業","detail":"動かすリソースと理由(1文)"}],' +
+  "出力はJSONのみ。前置き・マークダウン・コードフェンス禁止。各文は簡潔に。" +
+  '形式:{"business":{"name":"事業名","marketSize":1-5,"profitability":1-5,"barrier":1-5,"uniqueness":1-5,"som":獲得可能市場_円,"low3":保守_円,"base3":標準_円,"high3":強気_円,"fcBasis":"予測根拠(1文)","pathToTarget":"1億に届く条件(1文)","sellability":1-5,"strategicValue":1-5,"growth":1-5,"marketReality":"原価と市場評価/売れる構造の一言","otherValue":"数字に出ない価値・残す理由(なければ空文字)","reason":"プロとしての評価の要点(1文)"}}';
+const PF_SUM_SYS =
+  PF_ROLE +
+  "並走する複数の事業の一覧から、選択と集中の全体方針を示します（個々の採点は別途行うので不要）。" +
+  "出力はJSONのみ。前置き・マークダウン・コードフェンス禁止。各文は簡潔に。" +
+  '形式:{"portfolio":{"diagnosis":"プロ視点の全体診断(2-3文)。1億到達の可能性・売れる構造・リソース分散の観点で。","reallocation":[{"from":"減らす/畳む事業","to":"寄せる先の事業","detail":"動かすリソースと理由(1文)"}],' +
   '"validations":[{"business":"実証する事業","hypothesis":"確かめたい仮説","experiment":"最小の実験(小さく試す方法)","criteria":"続ける/やめるを分ける判断基準","period":"期間の目安"}],' +
   '"nonFinancial":"数字に出ない価値をステークホルダーにどう見せるかの方針(1-2文)",' +
   '"execLogic":["経営者への説明を5ステップで。1:現状(何がいくつ、多くは未収益)","2:全部は続けられない(リソースの現実)","3:だから1億到達の可能性で仕分ける","4:可能性はあるが未検証のものは実証(仮説→小さく試す→ダメなら早くやめる)","5:結論としてこのリソース配分にする"]}}';
@@ -596,19 +619,29 @@ export default function App() {
     setError(null); setLoading(true); setLoadingMsg("進行中の事業を多角的に整理しています…");
     try {
       const targetAmount = 100000000, targetLabel = "1億円"; // 成功ライン(固定)
-      const user = "以下は現在並走している事業です。新規事業の成功＝3年で売上1億円以上、を念頭に、市場規模とニーズから多角的に評価し、選択と集中を判断してください。\n\n" +
-        rows.map((r, i) => (i + 1) + ". " + r.name + "｜" + (r.memo || "") +
-          (r.vstatus ? "｜検証状況:" + evidenceDesc(r.vstatus) : "") +
-          (r.note ? "｜メモ(数字以外の価値・手応え・推進体制など):" + r.note.replace(/\n/g, " / ") : "") +
-          "｜形態:" + (r.bizType || "BtoB") + "｜売価:" + (Number(r.price) > 0 ? yen(r.price) : "未定") + "｜原価:" + (Number(r.unitCost) > 0 ? yen(r.unitCost) : "未定") +
-          "｜粗利率:" + (Number(r.price) > 0 ? marginPct(r.price, r.unitCost) + "%" : "—") + "｜頻度:" + freqText(r) +
-          "｜投入リソース:" + (r.resource || "?") + "人日/月｜熱量:" + r.passion + "/5｜ステージ:" + r.stage).join("\n");
-      // 事業数に応じて回答の上限を広げる（1事業あたり約700トークン＋全体診断）
-      const j = await askJSON(PF_SYS, user, Math.min(8000, 2000 + 700 * rows.length));
-      const aiMap = {};
-      (j.businesses || []).forEach((b) => { aiMap[b.name] = b; });
-      const merged = rows.map((r) => {
-        const ai = aiMap[r.name] || {};
+      const lineOf = (r) => r.name + "｜" + (r.memo || "") +
+        (r.vstatus ? "｜検証状況:" + evidenceDesc(r.vstatus) : "") +
+        (r.note ? "｜メモ(数字以外の価値・手応え・推進体制など):" + r.note.replace(/\n/g, " / ") : "") +
+        "｜形態:" + (r.bizType || "BtoB") + "｜売価:" + (Number(r.price) > 0 ? yen(r.price) : "未定") + "｜原価:" + (Number(r.unitCost) > 0 ? yen(r.unitCost) : "未定") +
+        "｜粗利率:" + (Number(r.price) > 0 ? marginPct(r.price, r.unitCost) + "%" : "—") + "｜頻度:" + freqText(r) +
+        "｜投入リソース:" + (r.resource || "?") + "人日/月｜熱量:" + r.passion + "/5｜ステージ:" + r.stage;
+      const n = rows.length;
+      let done = 0, sumDone = false;
+      const progress = () => setLoadingMsg("事業を評価しています（" + done + " / " + n + " 件完了）" + (sumDone ? "" : "・全体の方針を作成中") + "…");
+      progress();
+      // 全体診断は個別評価と同時に走らせる（入力情報だけで書けるため）
+      const sumP = askJSON(PF_SUM_SYS, "以下は現在並走している事業です。成功＝3年で売上1億円以上を念頭に、選択と集中の全体方針を示してください。\n\n" +
+        rows.map((r, i) => (i + 1) + ". " + lineOf(r)).join("\n"), 2500)
+        .then((x) => x.portfolio || x).catch(() => ({})).finally(() => { sumDone = true; progress(); });
+      const results = await runPool(rows, 3, (r) =>
+        askJSON(PF_ONE_SYS, "次の1事業を評価してください。成功＝3年で売上1億円以上。\n\n" + lineOf(r), 1500)
+          .then((x) => x.business || x).finally(() => { done++; progress(); }));
+      const failed = rows.filter((_, i) => results[i].error);
+      if (failed.length === n) throw results[0].error;
+      const pfSummary = await sumP;
+      const aiAt = (i) => (results[i] && results[i].value) || {};
+      const merged = rows.map((r, i) => {
+        const ai = aiAt(i);
         const margin = marginPct(r.price, r.unitCost);
         const preRevenue = (r.stage === "アイデア" || r.stage === "検証");
         const base3 = Number(ai.base3) || Number(ai.realY3) || 0;
@@ -636,7 +669,8 @@ export default function App() {
         b.composite = pfComposite(b);
         return b;
       });
-      setPfResult({ businesses: merged, portfolio: j.portfolio || {}, targetAmount, targetLabel });
+      setPfResult({ businesses: merged, portfolio: pfSummary || {}, targetAmount, targetLabel });
+      if (failed.length) setError("一部の事業はAIの評価を取得できず、仮の点数で表示しています：" + failed.map((r) => r.name).join("、") + "。もう一度「多角的に整理する」を押すと再評価します。");
       setStep("pfboard");
     } catch (e) { setError("整理に失敗しました：" + e.message); }
     finally { setLoading(false); }
