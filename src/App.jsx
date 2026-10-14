@@ -34,27 +34,41 @@ function friendlyError(status, e) {
   return "AIとの通信でエラーが発生しました（" + status + "）。もう一度お試しください。";
 }
 
+// 通信が途中で切れたときの案内。すぐ失敗したか、しばらく待って切れたかで原因の見当が変わる
+function networkError(sec) {
+  return sec < 5
+    ? "サーバーに接続できませんでした。社内ネットワークのセキュリティ設定で、このサイトとの通信が制限されている可能性があります。別のネットワーク（スマートフォンのテザリング等）でお試しいただくか、管理者までご連絡ください。"
+    : "AIの応答を待つ間に通信が切れました（約" + sec + "秒後）。社内ネットワークの機器で、時間のかかる通信が途中で切断されている可能性があります。もう一度お試しいただき、続く場合は別のネットワークでお試しいただくか、管理者までご連絡ください。";
+}
 async function callClaude(system, user, maxTokens) {
+  let netRetried = false;
   for (let attempt = 0; ; attempt++) {
-    let res;
+    let res, data = null;
+    const t0 = Date.now();
     try {
       res = await fetch("/api/claude", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-app-passcode": getPasscode() },
         body: JSON.stringify({ model: MODEL || undefined, max_tokens: maxTokens || 1500, system, messages: [{ role: "user", content: user }] }),
       });
-    } catch (x) { throw new Error("通信できませんでした。インターネット接続を確認して、もう一度お試しください。"); }
-    let data = null;
-    try { data = await res.json(); } catch (x) {}
-    if (res.status === 401 && data && data.error && data.error.type === "passcode" && attempt < 3) {
+      const raw = await res.text();
+      try { data = JSON.parse(raw); } catch (x) {}
+    } catch (x) {
+      // 回線の瞬断などに備えて1回だけ自動でやり直す
+      if (!netRetried) { netRetried = true; await new Promise((r) => setTimeout(r, 1500)); continue; }
+      throw new Error(networkError(Math.round((Date.now() - t0) / 1000)));
+    }
+    // サーバーは待機中も通信を保つため常に200で返し、AI側の結果は _status に入れて返す
+    const status = (data && data._status) || res.status;
+    if (status === 401 && data && data.error && data.error.type === "passcode" && attempt < 3) {
       const code = await askPasscode(attempt > 0 || !!getPasscode());
       if (!code) throw new Error("合言葉の入力がキャンセルされました。");
       setPasscode(code.trim());
       continue;
     }
     // 混雑（429/529）は少し待って最大2回やり直す
-    if ((res.status === 429 || res.status === 529) && attempt < 2) { await new Promise((r) => setTimeout(r, 4000 * (attempt + 1))); continue; }
-    if (!res.ok || !data) throw new Error(friendlyError(res.status, data));
+    if ((status === 429 || status === 529) && attempt < 2) { await new Promise((r) => setTimeout(r, 4000 * (attempt + 1))); continue; }
+    if (status < 200 || status >= 300 || !data) throw new Error(friendlyError(status, data));
     const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
     return { text, truncated: data.stop_reason === "max_tokens" };
   }
@@ -532,7 +546,7 @@ export default function App() {
         "【解決したい課題・気づき】\n" + (input.problem || "（未記入）") + "\n\n" +
         "【ターゲット顧客】\n" + (input.customer || "（未記入）") + "\n\n" +
         "【自社の強み・資産（技術/設備/商品/顧客）】\n" + (input.strength || "（未記入）") + "\n\n" +
-        "【業界・ドメイン】\n" + (input.domain || "（指定なし）") + "\n\n" +
+        "【業界・領域（自社の業界や、狙いたい市場）】\n" + (input.domain || "（指定なし）") + "\n\n" +
         "【制約・前提】\n" + (input.constraint || "（特になし）") + "\n\n" +
         (input.materials ? "【アップロード資料】\n" + input.materials + "\n" : "");
       const j = await askJSON(candSys(themeLabel, targetLabel, question), user, 4000);
@@ -1054,7 +1068,7 @@ function InputScreen({ value, onChange, theme, setTheme, target, setTarget, onSu
           onChange={(v) => set("problem", v)} ph="例）本業の市場が縮小し、新たな収益の柱がない…" />
         <Field label="ターゲット顧客" value={value.customer} onChange={(v) => set("customer", v)} ph="例）まだ取引のない中小メーカー" />
         <Field label="自社の強み・資産" hint="技術/設備/商品/顧客基盤" value={value.strength} onChange={(v) => set("strength", v)} ph="例）精密加工・試作対応・既存顧客300社" />
-        <Field label="業界・ドメイン（任意）" value={value.domain} onChange={(v) => set("domain", v)} ph="例）製造業 / 部品加工" />
+        <Field label="業界・領域（任意）" hint="自社の業界や、狙いたい市場" value={value.domain} onChange={(v) => set("domain", v)} ph="例）製造業 / 部品加工、ペット市場 など" />
         <Field label="制約・前提（任意）" value={value.constraint} onChange={(v) => set("constraint", v)} ph="例）新規事業室3名・兼任中心" />
         <div className="bp-uploadrow">
           <div className="bp-upload" onClick={() => fileRef.current && fileRef.current.click()}>
